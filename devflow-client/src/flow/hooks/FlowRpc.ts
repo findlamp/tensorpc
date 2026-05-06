@@ -10,6 +10,27 @@ const FLOW_PREFIX = "tensorpc.dock.serv.core::Flow";
 const JSON_ARRAY_FLAG = 0x10;
 const ENCODE_METHOD_MASK = 0xff;
 
+function formatRpcException(exception: unknown): string {
+  const raw = typeof exception === "string" ? exception : String(exception);
+  try {
+    const parsed = JSON.parse(raw) as { error?: unknown; detail?: unknown };
+    const error = typeof parsed.error === "string" ? parsed.error : "RPC error";
+    const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+    const permissionMatch = detail.match(/Permission denied for user ([^\\s]+) on host ([^\\s]+)/);
+    if (permissionMatch) {
+      return `${error}: Permission denied for user ${permissionMatch[1]} on host ${permissionMatch[2]}`;
+    }
+    const lastLine = detail
+      .split("\\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .pop();
+    return lastLine ? `${error}: ${lastLine}` : error;
+  } catch {
+    return raw.length > 500 ? `${raw.slice(0, 500)}...` : raw;
+  }
+}
+
 async function callRpc(
   serviceKey: string,
   args: unknown[],
@@ -36,7 +57,7 @@ async function callRpc(
   const reply = decodeRpcReply(respBuf);
   if (reply.exception) {
     console.error(`RPC ${serviceKey} error:`, reply.exception);
-    throw new Error(`RPC ${serviceKey} error: ${reply.exception}`);
+    throw new Error(`RPC ${serviceKey} error: ${formatRpcException(reply.exception)}`);
   }
   if (reply.data != null) {
     const skeleton = JSON.parse(reply.data) as unknown;

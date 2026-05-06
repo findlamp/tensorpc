@@ -770,6 +770,8 @@ export function FlowEditor({
         const exists = prev.find((g) => g.id === graph.id);
         return exists ? prev.map((g) => (g.id === graph.id ? updated : g)) : [...prev, updated];
       });
+      setSelectedNodeId(id);
+      setSshSettingsNodeId(type === "directssh" ? id : null);
       console.log(`Added ${type} node: ${id}`);
     },
     [activeGraph],
@@ -987,7 +989,13 @@ export function FlowEditor({
         : "";
 
   const selectedTemplateLabel =
-    appTemplates.find((template) => template.module === selectedFlowNode?.data.module)?.label ?? "";
+    appTemplates.find((template) => {
+      if (template.module) {
+        return template.module === selectedFlowNode?.data.module;
+      }
+      const templateCode = template.initCode ?? template.code ?? "";
+      return templateCode !== "" && templateCode === selectedFlowNode?.data.initCode;
+    })?.label ?? "";
   const selectedAppIsRunning =
     selectedFlowNode?.type === "app" &&
     (nodeStatuses[selectedFlowNode.id] === "running" ||
@@ -1044,9 +1052,10 @@ export function FlowEditor({
     if (!selectedFlowNode || selectedFlowNode.type !== "app") return;
     const template = appTemplates.find((item) => item.label === templateLabel);
     if (!template) return;
+    const templateCode = template.initCode ?? template.code ?? "";
     handleUpdateNode(selectedFlowNode.id, {
-      module: template.module,
-      initCode: template.initCode ?? selectedFlowNode.data.initCode ?? "",
+      module: template.module ?? "",
+      initCode: templateCode || (selectedFlowNode.data.initCode ?? ""),
       initConfig: template.initConfig
         ? JSON.stringify(template.initConfig, null, 2)
         : selectedFlowNode.data.initConfig ?? "{}",
@@ -1269,6 +1278,10 @@ export function FlowEditor({
               <button type="button" onClick={() => handleAddNode("app")} style={sidebarNavStyle}>
                 <AddRoundedIcon fontSize="small" />
                 New App
+              </button>
+              <button type="button" onClick={() => handleAddNode("directssh")} style={sidebarNavStyle}>
+                <AddRoundedIcon fontSize="small" />
+                New SSH
               </button>
             </div>
 

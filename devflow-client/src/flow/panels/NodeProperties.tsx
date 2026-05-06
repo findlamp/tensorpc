@@ -86,10 +86,11 @@ export function NodeProperties({ node, allNodes, appTemplates, onUpdate }: NodeP
   const handleSelectTemplate = (templateLabel: string) => {
     const tmpl = appTemplates.find((t) => t.label === templateLabel);
     if (tmpl) {
+      const templateCode = tmpl.initCode ?? tmpl.code ?? "";
       commitFormData({
         ...formData,
         module: tmpl.module || formData.module || "",
-        initCode: tmpl.initCode || formData.initCode || "",
+        initCode: templateCode || formData.initCode || "",
         initConfig: tmpl.initConfig
           ? JSON.stringify(tmpl.initConfig, null, 2)
           : formData.initConfig || "{}",

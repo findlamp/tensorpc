@@ -80,6 +80,8 @@ export interface AppTemplate {
   module: string;
   initCode?: string;
   initConfig?: Record<string, unknown>;
+  code?: string;
+  group?: string;
 }
 
 export interface DockLayoutModel {
