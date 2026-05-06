@@ -1,0 +1,92 @@
+/** Mirrors tensorpc.core.core_io.SocketMsgType */
+export const SocketMsgType = {
+  Subscribe: 0x01,
+  UnSubscribe: 0x02,
+  RPC: 0x03,
+  Event: 0x04,
+  Chunk: 0x05,
+  QueryServiceIds: 0x06,
+  Notification: 0x07,
+  EventChunk: 0x08,
+  HeaderChunk: 0x09,
+  Ping: 0x0a,
+  Pong: 0x0b,
+  ResetLargeDataClient: 0x0c,
+  EventError: 0x10,
+  RPCError: 0x20,
+  UserError: 0x30,
+  SubscribeError: 0x40,
+  OnConnectError: 0x50,
+} as const;
+
+/** Mirrors tensorpc.dock.core.component.AppEventType */
+export const AppEventType = {
+  UpdateLayout: 0,
+  UpdateComponents: 1,
+  DeleteComponents: 2,
+  UIEvent: 10,
+  UIUpdateEvent: 11,
+  UISaveStateEvent: 12,
+  Notify: 13,
+  UIUpdateBasePropsEvent: 14,
+  UIException: 15,
+  FrontendUIEvent: 16,
+  UIUpdateUsedEvents: 17,
+  ComponentEvent: 300,
+} as const;
+
+/** Mirrors tensorpc.dock.core.component.FrontendEventType */
+export const FrontendEventType = {
+  Click: 0,
+  DoubleClick: 1,
+  Enter: 2,
+  Leave: 3,
+  Over: 4,
+  Out: 5,
+  Up: 6,
+  Down: 7,
+  ContextMenu: 8,
+  Move: 9,
+  Missed: 10,
+  Wheel: 11,
+  KeyHold: 12,
+  KeyDown: 13,
+  KeyUp: 14,
+  Change: 20,
+  Delete: 21,
+  InputChange: 22,
+  ModalClose: 23,
+  Drag: 24,
+  Drop: 25,
+  SelectNewItem: 26,
+  Error: 27,
+  ContextMenuSelect: 28,
+  ComponentReady: 29,
+  TreeLazyExpand: 30,
+  TreeItemSelectChange: 31,
+  TreeItemToggle: 32,
+  TreeItemFocus: 33,
+  TreeItemButton: 34,
+  TreeItemRename: 36,
+  TreeItemExpandChange: 37,
+  EditorSave: 50,
+  EditorChange: 51,
+  EditorQueryState: 52,
+  EditorSaveState: 53,
+  EditorAction: 55,
+  EditorCursorSelection: 56,
+  FlowSelectionChange: 80,
+  FlowEdgeConnection: 82,
+  FlowEdgeDelete: 83,
+  FlowNodeDelete: 84,
+  FlowNodeContextMenu: 85,
+  FlowPaneContextMenu: 86,
+  FlowNodeLogicChange: 87,
+  FlowVisChange: 89,
+} as const;
+
+export const FLOW_APP_EVENT =
+  "tensorpc.dock.serv.core::Flow.app_event";
+
+export const FLOW_COMMAND_NODE_EVENT =
+  "tensorpc.dock.serv.core::Flow.command_node_event";
