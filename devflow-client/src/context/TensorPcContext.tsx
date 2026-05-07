@@ -53,6 +53,7 @@ export const TensorPcContext = createContext<TensorPcContextValue>({
 
 const JSON_ARRAY_FLAG = 0x10;
 const ENCODE_METHOD_MASK = 0xff;
+const WS_URL_STORAGE_KEY = "tensorpc-devdock-ws-url";
 
 function deriveHttpUrl(wsUrl: string): string {
   try {
@@ -66,7 +67,9 @@ function deriveHttpUrl(wsUrl: string): string {
 const RUN_UI_EVENT_KEY = "tensorpc.dock.serv.core::Flow.run_ui_event";
 
 export function TensorPcProvider({ children }: { children: ReactNode }) {
-  const [url, setUrl] = useState(() => {
+  const [url, setUrlState] = useState(() => {
+    const savedUrl = localStorage.getItem(WS_URL_STORAGE_KEY);
+    if (savedUrl) return savedUrl;
     const envHost = import.meta.env.VITE_DEFAULT_WS_HOST;
     const envPort = import.meta.env.VITE_DEFAULT_WS_PORT;
     const envPath = import.meta.env.VITE_DEFAULT_WS_PATH;
@@ -85,6 +88,13 @@ export function TensorPcProvider({ children }: { children: ReactNode }) {
   const commandHandlerRef = useRef<((ev: CommandNodeEventMessage) => void) | null>(null);
 
   const httpBaseUrl = deriveHttpUrl(url);
+
+  const setUrl = useCallback((nextUrl: string) => {
+    const trimmedUrl = nextUrl.trim();
+    if (!trimmedUrl) return;
+    localStorage.setItem(WS_URL_STORAGE_KEY, trimmedUrl);
+    setUrlState(trimmedUrl);
+  }, []);
 
   const disconnect = useCallback(() => {
     clientRef.current?.close();

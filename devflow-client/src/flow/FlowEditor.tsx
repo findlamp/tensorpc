@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import Editor from "@monaco-editor/react";
 import DeleteRoundedIcon from "@mui/icons-material/DeleteRounded";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
+import FullscreenExitRoundedIcon from "@mui/icons-material/FullscreenExitRounded";
 import FullscreenRoundedIcon from "@mui/icons-material/FullscreenRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
@@ -90,6 +91,39 @@ function publishStartupTerminalContent(content: string) {
       detail: { content: sanitizedContent },
     }),
   );
+}
+
+function parseConnectionUrl(wsUrl?: string) {
+  try {
+    const parsed = new URL(wsUrl ?? "");
+    const pathParts = parsed.pathname.split("/").filter(Boolean);
+    const hasClientId = pathParts.length > 2;
+    const clientId = hasClientId ? pathParts.pop() ?? "" : "";
+    const path = pathParts.length > 0 ? `/${pathParts.join("/")}` : "/api/ws";
+    return {
+      host: parsed.hostname || "localhost",
+      port: parsed.port || (parsed.protocol === "wss:" ? "443" : "80"),
+      path,
+      clientId,
+    };
+  } catch {
+    return {
+      host: "localhost",
+      port: "51052",
+      path: "/api/ws",
+      clientId: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    };
+  }
+}
+
+function buildConnectionUrl(draft: ReturnType<typeof parseConnectionUrl>) {
+  const host = draft.host.trim() || "localhost";
+  const port = draft.port.trim();
+  const normalizedPath = `/${draft.path.trim().replace(/^\/+/, "").replace(/\/+$/, "") || "api/ws"}`;
+  const clientId =
+    draft.clientId.trim() ||
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  return `ws://${host}${port ? `:${port}` : ""}${normalizedPath}/${clientId}`;
 }
 
 function normalizeNodeRuntimeStatus(status: Partial<NodeStatus> | null | undefined): string {
@@ -279,7 +313,13 @@ export function FlowEditor({
   onToggleSidebar?: () => void;
 }) {
   const isDarkTheme = themeMode === "dark";
-  const { status, subscribeToAppEvents, subscribeToCommandNodeEvents } = useContext(TensorPcContext);
+  const {
+    status,
+    setUrl,
+    disconnect,
+    subscribeToAppEvents,
+    subscribeToCommandNodeEvents,
+  } = useContext(TensorPcContext);
   const { setGraphContext } = useContext(LayoutContext);
   const [rpc] = useState(() => new FlowRpcClient());
   const [graphs, setGraphs] = useState<FlowGraphData[]>([]);
@@ -295,12 +335,18 @@ export function FlowEditor({
   const [statusMsg, setStatusMsg] = useState("");
   const [draggedAppId, setDraggedAppId] = useState<string | null>(null);
   const [isWorkbenchDragOver, setIsWorkbenchDragOver] = useState(false);
+  const [connectionDialogOpen, setConnectionDialogOpen] = useState(false);
+  const [connectionDraft, setConnectionDraft] = useState(() =>
+    parseConnectionUrl(connectionUrl),
+  );
+  const [isWorkspaceFullscreen, setIsWorkspaceFullscreen] = useState(false);
   const [, setSshSettingsNodeId] = useState<string | null>(null);
   const activeGraphIdRef = useRef(activeGraphId);
   const selectedNodeIdRef = useRef(selectedNodeId);
   const selectedComputeNodeIdRef = useRef<string | null>(null);
   const appLayoutRef = useRef(appLayout);
   const appLayoutNodeIdRef = useRef(appLayoutNodeId);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const appRuntimeRef = useRef<HTMLDivElement>(null);
   const graphMutationTimerRef = useRef<number | null>(null);
   const appRuntimeHydrationKeyRef = useRef("");
@@ -327,6 +373,26 @@ export function FlowEditor({
   useEffect(() => {
     appLayoutNodeIdRef.current = appLayoutNodeId;
   }, [appLayoutNodeId]);
+
+  useEffect(() => {
+    if (!connectionDialogOpen) {
+      setConnectionDraft(parseConnectionUrl(connectionUrl));
+    }
+  }, [connectionDialogOpen, connectionUrl]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (document.fullscreenElement === workspaceRef.current) {
+        setIsWorkspaceFullscreen(true);
+      } else if (!document.fullscreenElement) {
+        setIsWorkspaceFullscreen(false);
+      }
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
 
   useEffect(() => {
     const handleEditorDraft = (event: Event) => {
@@ -792,6 +858,66 @@ export function FlowEditor({
     [activeGraph],
   );
 
+  const handleDeleteNode = useCallback(
+    async (event: React.MouseEvent<HTMLButtonElement>, node: FlowNode) => {
+      event.stopPropagation();
+      if (!activeGraph) return;
+      const label = nodeLabel(node);
+      if (!window.confirm(`Delete ${label}?`)) return;
+
+      const updatedNodes = activeGraph.nodes
+        .filter((item) => item.id !== node.id)
+        .map((item) => {
+          if (node.type !== "directssh") return item;
+          const driver = item.data.driver;
+          if (driver !== node.id && driver !== node.data.readableNodeId) return item;
+          return {
+            ...item,
+            data: {
+              ...item.data,
+              driver: "",
+            },
+          };
+        });
+      const updated: FlowGraphData = {
+        ...activeGraph,
+        nodes: updatedNodes,
+        edges: activeGraph.edges.filter(
+          (edge) => edge.source !== node.id && edge.target !== node.id,
+        ),
+      };
+      setGraphs((prev) => prev.map((g) => (g.id === activeGraph.id ? updated : g)));
+      setNodeStatuses((prev) => {
+        const next = { ...prev };
+        delete next[node.id];
+        return next;
+      });
+      if (selectedNodeIdRef.current === node.id) {
+        const fallback = updated.nodes.find((item) => item.type === node.type) ?? updated.nodes[0] ?? null;
+        setSelectedNodeId(fallback?.id ?? null);
+      }
+      if (appLayoutNodeIdRef.current === node.id) {
+        setAppLayout(null);
+        setAppLayoutNodeId(null);
+        selectedComputeNodeIdRef.current = null;
+      }
+      try {
+        if (node.type === "app" && nodeStatuses[node.id] === "running") {
+          await rpc.stopNode(activeGraph.id, node.id).catch(() => undefined);
+        }
+        await rpc.saveGraph(activeGraph.id, updated);
+        setStatusMsg(`Deleted ${label}`);
+      } catch (err) {
+        setStatusMsg(
+          `Deleted locally; backend sync failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    },
+    [activeGraph, nodeStatuses, rpc],
+  );
+
   // Auto-save to localStorage whenever graphs change (only if has nodes)
   useEffect(() => {
     if (graphs.length > 0 && graphs.some((g) => g.nodes.length > 0)) {
@@ -921,17 +1047,33 @@ export function FlowEditor({
   }, [activeGraph, currentAppNode, rpc, selectedFlowNode]);
 
   const handleFullscreenApp = useCallback(() => {
-    const elem = appRuntimeRef.current ?? document.documentElement;
-    if (document.fullscreenElement) {
-      void document.exitFullscreen().catch((err) => {
-        setStatusMsg(`Exit fullscreen failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+    const elem = workspaceRef.current ?? document.documentElement;
+    if (isWorkspaceFullscreen) {
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch((err) => {
+          setStatusMsg(`Exit fullscreen failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+      setIsWorkspaceFullscreen(false);
       return;
     }
+    setIsWorkspaceFullscreen(true);
     void elem.requestFullscreen().catch((err) => {
-      setStatusMsg(`Fullscreen failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.warn("Native fullscreen failed; using app fullscreen layout:", err);
     });
-  }, []);
+  }, [isWorkspaceFullscreen]);
+
+  const handleApplyConnection = useCallback(
+    (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const nextUrl = buildConnectionUrl(connectionDraft);
+      disconnect();
+      setUrl(nextUrl);
+      setConnectionDialogOpen(false);
+      setStatusMsg(`WS set to ${nextUrl.replace("/api/ws/", "/").replace("127.0.0.1", "localhost")}`);
+    },
+    [connectionDraft, disconnect, setUrl],
+  );
 
   const handleSelectNode = useCallback(
     async (nodeId: string | null) => {
@@ -1155,10 +1297,15 @@ export function FlowEditor({
 
   return (
     <div
+      ref={workspaceRef}
       style={{
         display: "flex",
         flexDirection: "column",
-        height: "100%",
+        width: "100%",
+        height: isWorkspaceFullscreen ? "100vh" : "100%",
+        position: isWorkspaceFullscreen ? "fixed" : "relative",
+        inset: isWorkspaceFullscreen ? 0 : undefined,
+        zIndex: isWorkspaceFullscreen ? 900 : undefined,
         background: "var(--td-bg)",
         color: "var(--td-text)",
       }}
@@ -1292,36 +1439,60 @@ export function FlowEditor({
                   const isActive = selectedFlowNode?.id === node.id;
                   const running = nodeStatuses[node.id] === "running";
                   return (
-                    <button
+                    <div
                       key={node.id}
-                      type="button"
-                      draggable
-                      onDragStart={(event) => handleAppDragStart(event, node)}
-                      onDragEnd={handleAppDragEnd}
-                      onClick={() => void handleSelectNode(node.id)}
                       style={{
-                        ...sidebarItemStyle(isActive, true),
-                        opacity: draggedAppId === node.id ? 0.55 : 1,
-                        cursor: draggedAppId === node.id ? "grabbing" : "grab",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
                       }}
                     >
-                      <span style={sidebarBadgeStyle("app")}>APP</span>
-                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {nodeLabel(node)}
-                      </span>
-                      {running && (
-                        <span
-                          style={{
-                            width: 8,
-                            height: 8,
-                            borderRadius: "50%",
-                            background: "var(--td-green)",
-                            boxShadow: "0 0 0 3px color-mix(in srgb, var(--td-green) 18%, transparent)",
-                            flexShrink: 0,
-                          }}
-                        />
-                      )}
-                    </button>
+                      <button
+                        type="button"
+                        draggable
+                        onDragStart={(event) => handleAppDragStart(event, node)}
+                        onDragEnd={handleAppDragEnd}
+                        onClick={() => void handleSelectNode(node.id)}
+                        style={{
+                          ...sidebarItemStyle(isActive, true),
+                          width: "auto",
+                          flex: 1,
+                          minWidth: 0,
+                          opacity: draggedAppId === node.id ? 0.55 : 1,
+                          cursor: draggedAppId === node.id ? "grabbing" : "grab",
+                        }}
+                      >
+                        <span style={sidebarBadgeStyle("app")}>APP</span>
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {nodeLabel(node)}
+                        </span>
+                        {running && (
+                          <span
+                            style={{
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              background: "var(--td-green)",
+                              boxShadow: "0 0 0 3px color-mix(in srgb, var(--td-green) 18%, transparent)",
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        title={`Delete ${nodeLabel(node)}`}
+                        onClick={(event) => void handleDeleteNode(event, node)}
+                        style={{
+                          ...appIconButtonStyle(true),
+                          width: 28,
+                          height: 28,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <DeleteRoundedIcon fontSize="small" />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -1331,17 +1502,43 @@ export function FlowEditor({
                 {sshNodes.map((node) => {
                   const isActive = selectedFlowNode?.id === node.id;
                   return (
-                    <button
+                    <div
                       key={node.id}
-                      type="button"
-                      onClick={() => void handleSelectNode(node.id)}
-                      style={sidebarItemStyle(isActive)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
                     >
-                      <span style={sidebarBadgeStyle("ssh")}>SSH</span>
-                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {nodeLabel(node)}
-                      </span>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleSelectNode(node.id)}
+                        style={{
+                          ...sidebarItemStyle(isActive),
+                          width: "auto",
+                          flex: 1,
+                          minWidth: 0,
+                        }}
+                      >
+                        <span style={sidebarBadgeStyle("ssh")}>SSH</span>
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {nodeLabel(node)}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        title={`Delete ${nodeLabel(node)}`}
+                        onClick={(event) => void handleDeleteNode(event, node)}
+                        style={{
+                          ...appIconButtonStyle(true),
+                          width: 28,
+                          height: 28,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <DeleteRoundedIcon fontSize="small" />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -1349,8 +1546,10 @@ export function FlowEditor({
 
             <div style={{ padding: "10px 16px 16px", borderTop: "1px solid var(--td-border-soft)", display: "grid", gap: 8 }}>
               {displayConnectionUrl && (
-                <div
+                <button
+                  type="button"
                   title={connectionUrl}
+                  onClick={() => setConnectionDialogOpen(true)}
                   style={{
                     minWidth: 0,
                     display: "flex",
@@ -1363,13 +1562,14 @@ export function FlowEditor({
                     background: "color-mix(in srgb, var(--td-surface) 68%, transparent)",
                     fontSize: 12,
                     fontWeight: 650,
+                    cursor: "pointer",
                   }}
                 >
                   <span style={{ color: "var(--td-green)" }}>↔</span>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {displayConnectionUrl}
                   </span>
-                </div>
+                </button>
               )}
               <button type="button" onClick={onThemeToggle} style={sidebarNavStyle}>
                 <span style={{ width: 20, textAlign: "center" }}>{isDarkTheme ? "☀" : "☾"}</span>
@@ -1484,7 +1684,7 @@ export function FlowEditor({
                     display: "flex",
                     alignItems: "center",
                     padding: "0 8px",
-                    gap: 8,
+                    gap: 6,
                   }}
                 >
                   <span
@@ -1499,7 +1699,39 @@ export function FlowEditor({
                   >
                     {selectedFlowNode?.type === "directssh" ? "SSH" : "APP"}
                   </span>
-                  <strong style={{ fontSize: 14, color: "var(--td-text-strong)" }}>{selectedFlowTitle}</strong>
+                  {selectedFlowNode?.type === "app" ? (
+                    <input
+                      value={selectedFlowNode.data.readableNodeId ?? ""}
+                      onChange={(event) =>
+                        handleUpdateNode(selectedFlowNode.id, {
+                          readableNodeId: event.target.value,
+                        })
+                      }
+                      title="App name"
+                      style={{
+                        width: "min(220px, 30vw)",
+                        height: 30,
+                        border: "1px solid transparent",
+                        borderRadius: 4,
+                        padding: "0 6px",
+                        background: "transparent",
+                        color: "var(--td-text-strong)",
+                        fontSize: 14,
+                        fontWeight: 750,
+                        outline: "none",
+                      }}
+                      onFocus={(event) => {
+                        event.currentTarget.style.borderColor = "var(--td-input-border)";
+                        event.currentTarget.style.background = "var(--td-input-bg)";
+                      }}
+                      onBlur={(event) => {
+                        event.currentTarget.style.borderColor = "transparent";
+                        event.currentTarget.style.background = "transparent";
+                      }}
+                    />
+                  ) : (
+                    <strong style={{ fontSize: 14, color: "var(--td-text-strong)" }}>{selectedFlowTitle}</strong>
+                  )}
                   <div style={{ flex: 1 }} />
                   {selectedFlowNode && (
                     <>
@@ -1547,46 +1779,51 @@ export function FlowEditor({
                           SSH settings
                         </span>
                       )}
-                      <button
-                        type="button"
-                        onClick={selectedAppIsRunning ? undefined : handleStartNode}
-                        disabled={selectedFlowNode.type !== "app"}
-                        title={selectedAppIsRunning ? "App running" : "Start app"}
-                        style={appIconButtonStyle(selectedFlowNode.type === "app" && !selectedAppIsRunning)}
-                      >
-                        {selectedAppIsRunning ? (
-                          <PauseRoundedIcon fontSize="small" />
-                        ) : (
-                          <PlayArrowRoundedIcon fontSize="small" />
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleStopNode}
-                        disabled={selectedFlowNode.type !== "app" || !selectedAppIsRunning}
-                        title="Stop app"
-                        style={appIconButtonStyle(selectedFlowNode.type === "app" && selectedAppIsRunning)}
-                      >
-                        <StopRoundedIcon fontSize="small" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleStopSession}
-                        disabled={selectedFlowNode.type !== "app"}
-                        title="Stop app session"
-                        style={appIconButtonStyle(selectedFlowNode.type === "app")}
-                      >
-                        <DeleteRoundedIcon fontSize="small" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleFullscreenApp}
-                        disabled={selectedFlowNode.type !== "app" || !selectedAppHasRuntime}
-                        title="Full screen app"
-                        style={appIconButtonStyle(selectedFlowNode.type === "app" && selectedAppHasRuntime)}
-                      >
-                        <FullscreenRoundedIcon fontSize="small" />
-                      </button>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                        <button
+                          type="button"
+                          onClick={selectedAppIsRunning ? undefined : handleStartNode}
+                          disabled={selectedFlowNode.type !== "app"}
+                          title={selectedAppIsRunning ? "App running" : "Start app"}
+                          style={appIconButtonStyle(selectedFlowNode.type === "app" && !selectedAppIsRunning)}
+                        >
+                          {selectedAppIsRunning ? (
+                            <PauseRoundedIcon fontSize="small" />
+                          ) : (
+                            <PlayArrowRoundedIcon fontSize="small" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleStopNode}
+                          disabled={selectedFlowNode.type !== "app" || !selectedAppIsRunning}
+                          title="Stop app"
+                          style={appIconButtonStyle(selectedFlowNode.type === "app" && selectedAppIsRunning)}
+                        >
+                          <StopRoundedIcon fontSize="small" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleStopSession}
+                          disabled={selectedFlowNode.type !== "app"}
+                          title="Stop app session"
+                          style={appIconButtonStyle(selectedFlowNode.type === "app")}
+                        >
+                          <DeleteRoundedIcon fontSize="small" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleFullscreenApp}
+                          title={isWorkspaceFullscreen ? "Exit full screen app" : "Full screen app"}
+                          style={appIconButtonStyle(true)}
+                        >
+                          {isWorkspaceFullscreen ? (
+                            <FullscreenExitRoundedIcon fontSize="small" />
+                          ) : (
+                            <FullscreenRoundedIcon fontSize="small" />
+                          )}
+                        </button>
+                      </div>
                     </>
                   )}
                 </div>
@@ -1798,6 +2035,135 @@ export function FlowEditor({
             )}
           </main>
         </div>
+      {connectionDialogOpen && (
+        <div
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConnectionDialogOpen(false);
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(0, 0, 0, 0.48)",
+          }}
+        >
+          <form
+            onSubmit={handleApplyConnection}
+            style={{
+              width: "min(420px, calc(100vw - 32px))",
+              border: "1px solid var(--td-border)",
+              borderRadius: 8,
+              padding: 18,
+              background: "var(--td-surface)",
+              color: "var(--td-text)",
+              boxShadow: "0 18px 55px rgba(0, 0, 0, 0.36)",
+              fontFamily: "Inter, system-ui, sans-serif",
+            }}
+          >
+            <div style={{ marginBottom: 14 }}>
+              <div
+                style={{
+                  color: "var(--td-text-strong)",
+                  fontSize: 16,
+                  fontWeight: 750,
+                  lineHeight: 1.2,
+                }}
+              >
+                WebSocket
+              </div>
+              <div
+                style={{
+                  marginTop: 5,
+                  color: "var(--td-text-muted)",
+                  fontFamily: "Menlo, Monaco, Consolas, monospace",
+                  fontSize: 12,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {buildConnectionUrl(connectionDraft).replace("/api/ws/", "/").replace("127.0.0.1", "localhost")}
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 108px", gap: 10 }}>
+              <label>
+                <span style={fieldLabelStyle}>Host</span>
+                <input
+                  value={connectionDraft.host}
+                  onChange={(event) =>
+                    setConnectionDraft((current) => ({ ...current, host: event.target.value }))
+                  }
+                  style={fieldInputStyle}
+                />
+              </label>
+              <label>
+                <span style={fieldLabelStyle}>Port</span>
+                <input
+                  inputMode="numeric"
+                  value={connectionDraft.port}
+                  onChange={(event) =>
+                    setConnectionDraft((current) => ({ ...current, port: event.target.value }))
+                  }
+                  style={fieldInputStyle}
+                />
+              </label>
+            </div>
+            <label style={{ display: "block", marginTop: 12 }}>
+              <span style={fieldLabelStyle}>Path</span>
+              <input
+                value={connectionDraft.path}
+                onChange={(event) =>
+                  setConnectionDraft((current) => ({ ...current, path: event.target.value }))
+                }
+                style={fieldInputStyle}
+              />
+            </label>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: 8,
+                marginTop: 18,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setConnectionDialogOpen(false)}
+                style={{
+                  height: 34,
+                  padding: "0 14px",
+                  border: "1px solid var(--td-border)",
+                  borderRadius: 4,
+                  background: "transparent",
+                  color: "var(--td-text)",
+                  cursor: "pointer",
+                  fontWeight: 650,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                style={{
+                  height: 34,
+                  padding: "0 16px",
+                  border: "1px solid var(--td-blue)",
+                  borderRadius: 4,
+                  background: "var(--td-blue)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 750,
+                }}
+              >
+                Apply
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {/* Status bar */}
       {statusMsg && (
         <div style={{
