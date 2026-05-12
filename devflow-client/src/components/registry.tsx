@@ -64,6 +64,7 @@ import { ListItemIconComp } from "./list/ListItemIcon";
 import { Breadcrumbs } from "./list/Breadcrumbs";
 import { Tabs } from "./list/Tabs";
 import { MenuListContent } from "./list/MenuList";
+import { ThreeNode } from "./three/ThreeNode";
 
 // Charts - lazy loaded
 const LazyBarChart = lazy(() => import("./charts/BarChart").then((m) => ({ default: m.BarChart })));
@@ -86,6 +87,7 @@ import { SimpleEditor } from "./viewers/SimpleEditor";
 import { VideoPlayer } from "./viewers/VideoPlayer";
 import { Terminal } from "./viewers/Terminal";
 import { AppTerminal } from "./viewers/AppTerminal";
+import { DataModel } from "./data/DataModel";
 
 // Data model stubs
 import { DataGrid } from "./data/DataGrid";
@@ -208,6 +210,83 @@ export const COMPONENT_REGISTRY: Record<number, ComponentRenderFn> = {
 
   // Three.js (lazy)
   [UIType.ThreeCanvas]: withSuspense(LazyThreeCanvas),
+  [UIType.ThreePoints]: ThreeNode,
+  [UIType.ThreePerspectiveCamera]: ThreeNode,
+  [UIType.ThreeGroup]: ThreeNode,
+  [UIType.ThreeOrthographicCamera]: ThreeNode,
+  [UIType.ThreeFlex]: ThreeNode,
+  [UIType.ThreeFlexItemBox]: ThreeNode,
+  [UIType.ThreeHtml]: ThreeNode,
+  [UIType.ThreeHud]: ThreeNode,
+  [UIType.ThreeView]: ThreeNode,
+  [UIType.ThreeMapControl]: ThreeNode,
+  [UIType.ThreeOrbitControl]: ThreeNode,
+  [UIType.ThreePointerLockControl]: ThreeNode,
+  [UIType.ThreeFirstPersonControl]: ThreeNode,
+  [UIType.ThreeTransformControl]: ThreeNode,
+  [UIType.ThreeCameraControl]: ThreeNode,
+  [UIType.ThreePivotControl]: ThreeNode,
+  [UIType.ThreeBoundingBox]: ThreeNode,
+  [UIType.ThreeAxesHelper]: ThreeNode,
+  [UIType.ThreeInfiniteGridHelper]: ThreeNode,
+  [UIType.ThreeSegments]: ThreeNode,
+  [UIType.ThreeImage]: ThreeNode,
+  [UIType.ThreeBoxes2D]: ThreeNode,
+  [UIType.ThreeText]: ThreeNode,
+  [UIType.ThreeMeshMaterial]: ThreeNode,
+  [UIType.ThreeMesh]: ThreeNode,
+  [UIType.ThreeBufferGeometry]: ThreeNode,
+  [UIType.ThreeFlexAutoReflow]: ThreeNode,
+  [UIType.ThreeLine]: ThreeNode,
+  [UIType.ThreeFlexManualReflow]: ThreeNode,
+  [UIType.ThreeScreenShot]: ThreeNode,
+  [UIType.ThreePointLight]: ThreeNode,
+  [UIType.ThreeDirectionalLight]: ThreeNode,
+  [UIType.ThreeSpotLight]: ThreeNode,
+  [UIType.ThreeAmbientLight]: ThreeNode,
+  [UIType.ThreeHemisphereLight]: ThreeNode,
+  [UIType.ThreePrimitiveMesh]: ThreeNode,
+  [UIType.ThreeEdges]: ThreeNode,
+  [UIType.ThreeBufferMesh]: ThreeNode,
+  [UIType.ThreeVoxelMesh]: ThreeNode,
+  [UIType.ThreeInstancedMesh]: ThreeNode,
+  [UIType.ThreeSky]: ThreeNode,
+  [UIType.ThreeEnvironment]: ThreeNode,
+  [UIType.ThreeWireframe]: ThreeNode,
+  [UIType.ThreeLightFormer]: ThreeNode,
+  [UIType.ThreeAccumulativeShadows]: ThreeNode,
+  [UIType.ThreeRandomizedLight]: ThreeNode,
+  [UIType.ThreeBVH]: ThreeNode,
+  [UIType.ThreeCubeCamera]: ThreeNode,
+  [UIType.ThreeContactShadows]: ThreeNode,
+  [UIType.ThreeGizmoHelper]: ThreeNode,
+  [UIType.ThreeSelectionContext]: ThreeNode,
+  [UIType.ThreeOutlines]: ThreeNode,
+  [UIType.ThreeInstancedBufferMesh]: ThreeNode,
+  [UIType.ThreeDataListGroup]: ThreeNode,
+  [UIType.ThreeHudGroup]: ThreeNode,
+  [UIType.ThreeMeshBasicMaterial]: ThreeNode,
+  [UIType.ThreeMeshStandardMaterial]: ThreeNode,
+  [UIType.ThreeMeshLambertMaterial]: ThreeNode,
+  [UIType.ThreeMeshMatcapMaterial]: ThreeNode,
+  [UIType.ThreeMeshNormalMaterial]: ThreeNode,
+  [UIType.ThreeMeshPhongMaterial]: ThreeNode,
+  [UIType.ThreeMeshPhysicalMaterial]: ThreeNode,
+  [UIType.ThreeMeshToonMaterial]: ThreeNode,
+  [UIType.ThreeMeshDepthMaterial]: ThreeNode,
+  [UIType.ThreeRawShaderMaterial]: ThreeNode,
+  [UIType.ThreeMeshTransmissionMaterial]: ThreeNode,
+  [UIType.ThreeMeshDiscardMaterial]: ThreeNode,
+  [UIType.ThreeMeshShaderMaterial]: ThreeNode,
+  [UIType.ThreeMeshPortalMaterial]: ThreeNode,
+  [UIType.ThreeSimpleGeometry]: ThreeNode,
+  [UIType.ThreeShape]: ThreeNode,
+  [UIType.ThreeLineShape]: ThreeNode,
+  [UIType.ThreeEffectComposer]: ThreeNode,
+  [UIType.ThreeEffectOutline]: ThreeNode,
+  [UIType.ThreeEffectBloom]: ThreeNode,
+  [UIType.ThreeEffectDepthOfField]: ThreeNode,
+  [UIType.ThreeEffectToneMapping]: ThreeNode,
 
   // Viewers
   [UIType.JsonViewer]: JsonViewer,
@@ -219,7 +298,7 @@ export const COMPONENT_REGISTRY: Record<number, ComponentRenderFn> = {
   [UIType.AppTerminal]: AppTerminal,
 
   // Data model
-  [UIType.DataModel]: DataFlexBox,
+  [UIType.DataModel]: DataModel,
   [UIType.JsonLikeTreeView]: TanstackJsonLikeTree,
   [UIType.TanstackJsonLikeTreeView]: TanstackJsonLikeTree,
   [UIType.DataGrid]: DataGrid,

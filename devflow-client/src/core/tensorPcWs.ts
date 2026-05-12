@@ -32,6 +32,23 @@ export type CommandNodeEventMessage = {
   data: unknown;
 };
 
+type PendingChunkedEvent = {
+  headerData: string;
+  serviceId: number;
+  numChunks: number;
+  chunks: Map<number, Uint8Array>;
+};
+
+type PendingRpc = {
+  headerData: string;
+  serviceId: number;
+  numChunks: number;
+  chunks: Map<number, Uint8Array>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 export interface TensorPcWsOptions {
   /** Max reconnection attempts (default: 10) */
   maxReconnects?: number;
@@ -50,13 +67,16 @@ export class TensorPcWs {
   private serviceMap: Record<string, number> = {};
   private onAppEventCb: ((ev: AppEventMessage) => void) | null = null;
   private onCommandNodeEventCb: ((ev: CommandNodeEventMessage) => void) | null = null;
+  private eventChunkPendings = new Map<string, PendingChunkedEvent>();
+  private rpcPendings = new Map<string, PendingRpc>();
+  private subscribedServices = new Set<string>();
   private options: Required<TensorPcWsOptions>;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
 
   constructor(
-    private readonly url: string,
+    private url: string,
     options: TensorPcWsOptions = {},
   ) {
     this.options = {
@@ -76,6 +96,7 @@ export class TensorPcWs {
   private doConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
       let opened = false;
+      this.subscribedServices.clear();
       const ws = new WebSocket(this.url);
       ws.binaryType = "arraybuffer";
       this.ws = ws;
@@ -129,6 +150,7 @@ export class TensorPcWs {
 
     this.reconnectTimer = setTimeout(async () => {
       try {
+        this.url = withFreshClientId(this.url);
         await this.doConnect();
         // Re-subscribe if we had a handler
         if (this.onAppEventCb) {
@@ -153,7 +175,89 @@ export class TensorPcWs {
     this.subscribeToService(FLOW_COMMAND_NODE_EVENT);
   }
 
+  async call(serviceKey: string, args: unknown[], timeoutMs = 30_000): Promise<unknown> {
+    await this.waitUntilConnected(Math.min(timeoutMs, 5_000));
+    const sid = this.serviceMap[serviceKey];
+    if (sid === undefined) {
+      throw new Error(`Missing ${serviceKey} in service map`);
+    }
+
+    const rpcId = Long.fromNumber(Date.now()).mul(1_000_000).add(
+      Math.floor(Math.random() * 1_000_000),
+    );
+    const rpcIdKey = rpcId.toString();
+    const frame = buildFrame(SocketMsgType.RPC, {
+      service_id: sid,
+      rpc_id: rpcId,
+      chunk_index: 0,
+      data: JSON.stringify([[], [args, {}]]),
+    });
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rpcPendings.delete(rpcIdKey);
+        reject(new Error(`RPC ${serviceKey} timeout`));
+      }, timeoutMs);
+      this.rpcPendings.set(rpcIdKey, {
+        headerData: "",
+        serviceId: sid,
+        numChunks: 0,
+        chunks: new Map(),
+        resolve,
+        reject,
+        timer,
+      });
+      this.ws?.send(frame);
+    });
+  }
+
+  async notify(serviceKey: string, args: unknown[]) {
+    await this.waitUntilConnected(5_000);
+    const sid = this.serviceMap[serviceKey];
+    if (sid === undefined) {
+      const keys = Object.keys(this.serviceMap).slice(0, 20);
+      throw new Error(
+        `Missing ${serviceKey} in service map. Available: ${keys.join(", ") || "(none)"}`,
+      );
+    }
+    const rpcId = Long.fromNumber(Date.now()).mul(1_000_000).add(
+      Math.floor(Math.random() * 1_000_000),
+    );
+    const frame = buildFrame(SocketMsgType.Notification, {
+      service_id: sid,
+      rpc_id: rpcId,
+      chunk_index: 0,
+      data: JSON.stringify([[], [args, {}]]),
+    });
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket is not connected");
+    }
+    ws.send(frame);
+  }
+
+  waitUntilConnected(timeoutMs = 5_000): Promise<void> {
+    if (this.isConnected) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const timer = window.setInterval(() => {
+        if (this.isConnected) {
+          window.clearInterval(timer);
+          resolve();
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          window.clearInterval(timer);
+          reject(new Error("WebSocket is not connected"));
+        }
+      }, 50);
+    });
+  }
+
   private subscribeToService(serviceKey: string) {
+    if (this.subscribedServices.has(serviceKey)) {
+      return;
+    }
     const sid = this.serviceMap[serviceKey];
     if (sid === undefined) {
       const keys = Object.keys(this.serviceMap).slice(0, 20);
@@ -166,7 +270,6 @@ export class TensorPcWs {
         `Missing ${serviceKey} in service map. Available: ${keys.join(", ") || "(none)"}`,
       );
     }
-    console.log(`Subscribing to ${serviceKey} (service_id=${sid})`);
     const rpcId = Long.fromString(String(Date.now() * 1_000_000));
     const frame = buildFrame(SocketMsgType.Subscribe, {
       service_id: sid,
@@ -174,6 +277,7 @@ export class TensorPcWs {
       chunk_index: 0,
     });
     this.ws?.send(frame);
+    this.subscribedServices.add(serviceKey);
   }
 
   close() {
@@ -184,8 +288,14 @@ export class TensorPcWs {
     }
     this.ws?.close();
     this.ws = null;
+    this.subscribedServices.clear();
     this.onAppEventCb = null;
     this.onCommandNodeEventCb = null;
+    for (const pending of this.rpcPendings.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("WebSocket closed"));
+    }
+    this.rpcPendings.clear();
   }
 
   get isConnected(): boolean {
@@ -208,21 +318,6 @@ export class TensorPcWs {
 
     if (type === SocketMsgType.QueryServiceIds) {
       this.serviceMap = JSON.parse(dataStr) as Record<string, number>;
-      const keys = Object.keys(this.serviceMap);
-      console.log(`Service map received: ${keys.length} services`, keys.slice(0, 20));
-      const flowKey = FLOW_APP_EVENT;
-      const found = flowKey in this.serviceMap;
-      console.log(`Looking for "${flowKey}": ${found ? "FOUND" : "NOT FOUND"}`);
-      console.log(
-        `Looking for "${FLOW_COMMAND_NODE_EVENT}": ${
-          FLOW_COMMAND_NODE_EVENT in this.serviceMap ? "FOUND" : "NOT FOUND"
-        }`,
-      );
-      if (!found && keys.length > 0) {
-        // Try to find similar keys
-        const matches = keys.filter((k) => k.toLowerCase().includes("flow") || k.toLowerCase().includes("app_event"));
-        console.log(`Similar keys matching "flow" or "app_event":`, matches);
-      }
       return true;
     }
 
@@ -230,25 +325,99 @@ export class TensorPcWs {
       (hdr as { chunk_index?: number }).chunk_index ?? 0,
     );
     if (type === SocketMsgType.Event) {
-      if (chunkIndex !== 0) {
-        console.warn("Chunked Event not implemented; drop");
+      if (chunkIndex > 0) {
+        this.eventChunkPendings.set(headerRpcIdToString(hdr.rpc_id), {
+          headerData: dataStr,
+          serviceId: hdr.service_id,
+          numChunks: chunkIndex,
+          chunks: new Map(),
+        });
         return false;
       }
-      const { meta, skeleton } = parseSkeletonData(dataStr);
-      const arrays = extractArraysFromBinary(meta, rest);
-      const decoded = putArraysToData(arrays as ArrayBufferView[], skeleton);
-      const payload = decoded as unknown[];
-      const appEv = payload[0] as AppEventMessage;
-      const commandEv = payload[0] as CommandNodeEventMessage;
-      if (appEv && Array.isArray(appEv.typeToEvents)) {
-        console.log(
-          `Event received: uid=${appEv.uid}, types=[${appEv.typeToEvents.map(([t]) => t).join(",")}]`,
+      this.dispatchDecodedEvent(dataStr, rest, hdr.service_id);
+      return false;
+    }
+
+    if (type === SocketMsgType.EventChunk) {
+      const pendingId = decodeProtobufUintToString(hdr.rpc_id);
+      const pending = this.eventChunkPendings.get(pendingId);
+      if (!pending) {
+        console.warn(`Chunked Event ${pendingId} not found; drop chunk`);
+        return false;
+      }
+      pending.chunks.set(decodeProtobufUintToNumber(hdr.chunk_index), rest);
+      if (pending.chunks.size === pending.numChunks) {
+        this.eventChunkPendings.delete(pendingId);
+        const chunks: Uint8Array[] = [];
+        for (let i = 0; i < pending.numChunks; i++) {
+          const part = pending.chunks.get(i);
+          if (!part) {
+            console.warn(`Chunked Event ${pendingId} missing chunk ${i}`);
+            return false;
+          }
+          chunks.push(part);
+        }
+        this.dispatchDecodedEvent(
+          pending.headerData,
+          concatUint8Arrays(chunks),
+          pending.serviceId,
         );
-        this.onAppEventCb?.(appEv);
-      } else if (commandEv && typeof commandEv.uid === "string" && "data" in commandEv) {
-        this.onCommandNodeEventCb?.(commandEv);
-      } else {
-        console.warn("Event received but payload is unexpected:", payload);
+      }
+      return false;
+    }
+
+    if (type === SocketMsgType.RPC) {
+      const pendingId = headerRpcIdToString(hdr.rpc_id);
+      const pending = this.rpcPendings.get(pendingId);
+      if (!pending) {
+        console.warn(`RPC ${pendingId} not found; drop reply`);
+        return false;
+      }
+      if (chunkIndex > 0) {
+        pending.headerData = dataStr;
+        pending.numChunks = chunkIndex;
+        pending.serviceId = hdr.service_id;
+        return false;
+      }
+      this.resolveRpcPending(pendingId, pending, dataStr, rest);
+      return false;
+    }
+
+    if (type === SocketMsgType.Chunk) {
+      const pendingId = decodeProtobufUintToString(hdr.rpc_id);
+      const pending = this.rpcPendings.get(pendingId);
+      if (!pending) {
+        console.warn(`RPC ${pendingId} not found; drop chunk`);
+        return false;
+      }
+      pending.chunks.set(decodeProtobufUintToNumber(hdr.chunk_index), rest);
+      if (pending.chunks.size === pending.numChunks) {
+        const chunks: Uint8Array[] = [];
+        for (let i = 0; i < pending.numChunks; i++) {
+          const part = pending.chunks.get(i);
+          if (!part) {
+            console.warn(`RPC ${pendingId} missing chunk ${i}`);
+            return false;
+          }
+          chunks.push(part);
+        }
+        this.resolveRpcPending(
+          pendingId,
+          pending,
+          pending.headerData,
+          concatUint8Arrays(chunks),
+        );
+      }
+      return false;
+    }
+
+    if (type === SocketMsgType.RPCError || type === SocketMsgType.UserError) {
+      const pendingId = headerRpcIdToString(hdr.rpc_id);
+      const pending = this.rpcPendings.get(pendingId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.rpcPendings.delete(pendingId);
+        pending.reject(new Error(formatSocketError(dataStr)));
       }
       return false;
     }
@@ -258,6 +427,169 @@ export class TensorPcWs {
     }
     return false;
   }
+
+  private resolveRpcPending(
+    pendingId: string,
+    pending: PendingRpc,
+    dataStr: string,
+    binary: Uint8Array,
+  ) {
+    try {
+      const decoded = decodeTensorPcPayload(dataStr, binary);
+      clearTimeout(pending.timer);
+      this.rpcPendings.delete(pendingId);
+      pending.resolve(unwrapRpcResult(decoded));
+    } catch (err) {
+      clearTimeout(pending.timer);
+      this.rpcPendings.delete(pendingId);
+      pending.reject(err);
+    }
+  }
+
+  private dispatchDecodedEvent(
+    dataStr: string,
+    binary: Uint8Array,
+    serviceId: number,
+  ) {
+    const decoded = decodeTensorPcPayload(dataStr, binary);
+    const payload = decoded as unknown[];
+    const isAppEvent = serviceId === this.serviceMap[FLOW_APP_EVENT];
+    const isCommandNodeEvent = serviceId === this.serviceMap[FLOW_COMMAND_NODE_EVENT];
+
+    if (isAppEvent) {
+      const appEv = findAppEventPayload(payload) as AppEventMessage;
+      if (!appEv || !Array.isArray(appEv.typeToEvents)) {
+        console.warn("App event payload is unexpected:", payload);
+        return;
+      }
+      this.onAppEventCb?.(appEv);
+      return;
+    }
+
+    if (isCommandNodeEvent) {
+      const commandPayload = findCommandEventPayload(payload);
+      if (!commandPayload) {
+        console.warn("Command event payload is unexpected:", payload);
+        return;
+      }
+      this.onCommandNodeEventCb?.({
+        uid: commandPayload.uid,
+        data: commandPayload,
+      });
+      return;
+    }
+
+    console.warn("Event received for unknown service:", serviceId, payload);
+  }
+}
+
+function createClientId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function withFreshClientId(wsUrl: string): string {
+  try {
+    const u = new URL(wsUrl);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const clientId = createClientId();
+    if (parts.length >= 2 && parts.at(-2) === "ws") {
+      parts[parts.length - 1] = clientId;
+    } else {
+      parts.push(clientId);
+    }
+    u.pathname = `/${parts.join("/")}`;
+    return u.toString();
+  } catch {
+    return wsUrl;
+  }
+}
+
+function decodeTensorPcPayload(dataStr: string, binary: Uint8Array) {
+  const { meta, skeleton } = parseSkeletonData(dataStr);
+  const arrays = extractArraysFromBinary(meta, binary);
+  return putArraysToData(arrays as ArrayBufferView[], skeleton);
+}
+
+function unwrapRpcResult(decoded: unknown) {
+  if (Array.isArray(decoded)) {
+    const args = decoded[0];
+    if (Array.isArray(args)) return args[0] ?? null;
+    return args ?? null;
+  }
+  return decoded;
+}
+
+function formatSocketError(dataStr: string) {
+  try {
+    const parsed = JSON.parse(dataStr) as { error?: unknown; detail?: unknown };
+    const error = typeof parsed.error === "string" ? parsed.error : "RPC error";
+    const detail = typeof parsed.detail === "string" ? parsed.detail : "";
+    const lastLine = detail
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .pop();
+    return lastLine ? `${error}: ${lastLine}` : error;
+  } catch {
+    return dataStr || "RPC error";
+  }
+}
+
+function headerRpcIdToString(value: unknown) {
+  if (Long.isLong(value)) return value.toString();
+  return String(value ?? 0);
+}
+
+function decodeProtobufUintToString(value: unknown) {
+  const longValue = Long.isLong(value)
+    ? value
+    : Long.fromValue(value as Long | number | string);
+  return longValue.sub(1).toString();
+}
+
+function decodeProtobufUintToNumber(value: unknown) {
+  return Number(decodeProtobufUintToString(value));
+}
+
+function concatUint8Arrays(parts: Uint8Array[]) {
+  const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+function findAppEventPayload(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.typeToEvents)) return value;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findAppEventPayload(item);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function findCommandEventPayload(value: unknown): { uid: string } | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (typeof record.uid === "string" && typeof record.type === "string") {
+      return record as { uid: string };
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCommandEventPayload(item);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 export { buildFrame, EMPTY_SKELETON, FLOW_APP_EVENT };

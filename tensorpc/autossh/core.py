@@ -1345,6 +1345,9 @@ class SSHClient:
                     rbuf_max_length=rbuf_max_length, term_type=term_type,
                     enable_raw_event=enable_raw_event)
                 session.uid = self.uid
+                fwd_ports, rfwd_ports, fwd_listeners, rfwd_listeners = await self._handle_forward_ports(conn, forward_ports, r_forward_ports)
+                if env_port_modifier is not None and (rfwd_ports or fwd_ports):
+                    env_port_modifier(fwd_ports, rfwd_ports, env)
                 if init_cmd_pairs is None:
                     init_cmd_pairs = []
                 if env:
@@ -1386,13 +1389,10 @@ class SSHClient:
                 raw_ev_task = asyncio.create_task(raw_ev.wait(), name="autossh-raw-wait")
                 if enable_raw_event:
                     wait_tasks.append(raw_ev_task)
-                fwd_ports, rfwd_ports, fwd_listeners, rfwd_listeners = await self._handle_forward_ports(conn, forward_ports, r_forward_ports)
                 # for listener in rfwd_listeners:
                 #     wait_tasks.append(asyncio.create_task(listener.wait_closed()))
                 # for listener in fwd_listeners:
                 #     wait_tasks.append(asyncio.create_task(listener.wait_closed()))
-                if env_port_modifier is not None and (rfwd_ports or fwd_ports):
-                    env_port_modifier(fwd_ports, rfwd_ports, env)
                 await peer_client.is_inited_ev.wait()
                 if init_event is not None:
                     init_event.set()

@@ -75,13 +75,16 @@ export function MonacoEditor({
   const sx = useFlexStyles(props);
   const { sendUiEvent } = useContext(TensorPcContext);
   const { graphId, nodeId } = useContext(LayoutContext);
-  const initialValue = typeof props.value === "string" ? props.value : "";
-  const [value, setValue] = useState(initialValue);
+  const propValue = typeof props.value === "string" ? props.value : "";
   const [themeMode, setThemeMode] = useState<"dark" | "light">(() =>
     currentThemeMode(),
   );
   const timerRef = useRef<number | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const dirtyRef = useRef(false);
+  const lastPropValueRef = useRef(propValue);
+  const lastEditorIdentityRef = useRef("");
+  const syncingFromPropsRef = useRef(false);
   const compUid = typeof props.compUid === "string" ? props.compUid : "";
   const language = normalizeLanguage(
     typeof props.language === "string" ? props.language : "plaintext",
@@ -96,13 +99,31 @@ export function MonacoEditor({
     () => safeModelPath(nodeId ?? "", compUid, language),
     [compUid, language, nodeId],
   );
+  const [value, setValue] = useState(propValue);
 
   useEffect(() => {
-    setValue(initialValue);
-    if (compUid && initialValue.length > 0) {
-      publishEditorValue(compUid, initialValue, editorPath);
+    const editorIdentity = `${nodeId ?? ""}:${compUid}:${editorPath}`;
+    const editorChanged = lastEditorIdentityRef.current !== editorIdentity;
+    if (editorChanged) {
+      lastEditorIdentityRef.current = editorIdentity;
+      dirtyRef.current = false;
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
     }
-  }, [compUid, editorPath, initialValue]);
+    if (!editorChanged && dirtyRef.current) {
+      return;
+    }
+    syncingFromPropsRef.current = true;
+    lastPropValueRef.current = propValue;
+    dirtyRef.current = false;
+    setValue(propValue);
+    const timer = window.setTimeout(() => {
+      syncingFromPropsRef.current = false;
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [compUid, editorPath, nodeId, propValue]);
 
   useEffect(() => {
     return () => {
@@ -127,7 +148,7 @@ export function MonacoEditor({
   const sendEditorChange = useCallback(
     (nextValue: string) => {
       if (!graphId || !nodeId || !compUid) return;
-      void sendUiEvent(graphId, nodeId, compUid, FrontendEventType.EditorChange, {
+      void sendUiEvent(graphId, nodeId, compUid, FrontendEventType.Change, {
         value: nextValue,
         viewState: editorRef.current?.saveViewState() ?? null,
       });
@@ -154,6 +175,11 @@ export function MonacoEditor({
       const editor = editorRef.current;
       const model = editor?.getModel();
       const nextValue = editor?.getValue() ?? value;
+      if (!dirtyRef.current && nextValue === lastPropValueRef.current && userdata === undefined) {
+        return;
+      }
+      dirtyRef.current = false;
+      lastPropValueRef.current = nextValue;
       publishEditorValue(compUid, nextValue, editorPath);
       void sendUiEvent(graphId, nodeId, compUid, FrontendEventType.EditorSave, {
         value: nextValue,
@@ -173,9 +199,6 @@ export function MonacoEditor({
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         sendEditorSave();
       });
-      editor.onDidBlurEditorText(() => {
-        sendEditorSave();
-      });
       editor.layout();
     },
     [sendEditorSave],
@@ -191,8 +214,14 @@ export function MonacoEditor({
       if (type === MonacoEditorControlType.Save) {
         sendEditorSave(data.userdata);
       } else if (type === MonacoEditorControlType.SetValue && typeof data.value === "string") {
+        syncingFromPropsRef.current = true;
+        lastPropValueRef.current = data.value;
+        dirtyRef.current = false;
         editorRef.current?.setValue(data.value);
         setValue(data.value);
+        window.setTimeout(() => {
+          syncingFromPropsRef.current = false;
+        }, 0);
       } else if (type === MonacoEditorControlType.SetLineNumber) {
         const lineNumber = typeof data.value === "number" ? data.value : 1;
         editorRef.current?.revealLineInCenter(lineNumber);
@@ -212,13 +241,10 @@ export function MonacoEditor({
 
   return (
     <div
-      onKeyDownCapture={(event) => event.stopPropagation()}
-      onKeyUpCapture={(event) => event.stopPropagation()}
-      onKeyPressCapture={(event) => event.stopPropagation()}
       style={{
         ...sx,
-        minHeight: sx.minHeight ?? 0,
-        height: sx.height ?? "100%",
+        minHeight: sx.minHeight ?? sx.height ?? 0,
+        height: "100%",
         width: sx.width ?? "100%",
         display: "flex",
         flexDirection: "column",
@@ -238,6 +264,8 @@ export function MonacoEditor({
         onChange={(nextValue) => {
           const safeValue = nextValue ?? "";
           setValue(safeValue);
+          if (syncingFromPropsRef.current) return;
+          dirtyRef.current = safeValue !== lastPropValueRef.current;
           publishEditorValue(compUid, safeValue, editorPath);
           queueEditorChange(safeValue);
         }}

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useContext, useRef } from "react";
+import { useState, useCallback, useEffect, useContext, useMemo, useRef } from "react";
 import type { CSSProperties } from "react";
 import Editor from "@monaco-editor/react";
 import DeleteRoundedIcon from "@mui/icons-material/DeleteRounded";
@@ -14,12 +14,24 @@ import { TensorPcContext } from "../context/TensorPcContext";
 import { LayoutContext } from "../context/LayoutContext";
 import { FlowRpcClient } from "./hooks/FlowRpc";
 import type { FlowGraphData, FlowNode, LoadGraphResponse, AppTemplate, NodeStatus } from "./types";
-import { LayoutRoot, applyUpdateComponents, extractUpdateLayout, normalizeLayoutPayload } from "../components/LayoutRoot";
+import {
+  LayoutRoot,
+  applyDataModelComponentEvents,
+  applyUiUpdateEvent,
+  applyUpdateComponents,
+  applyUpdateUsedEvents,
+  extractUpdateLayout,
+  normalizeLayoutPayload,
+} from "../components/LayoutRoot";
 import type { LayoutModel } from "../hooks/useLayoutModel";
 import type { AppEventMessage } from "../core/tensorPcWs";
 import { AppEventType, FrontendEventType } from "../core/socketTypes";
+import { patchLayoutUidWithPrefixes } from "../utils/layoutRefs";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const FLOW_SERVICE_PREFIX = "tensorpc.dock.serv.core::Flow";
+const TERMINAL_SNAPSHOT_WIDTH = 240;
+const TERMINAL_SNAPSHOT_HEIGHT = 240;
 
 function SidebarToggleIcon() {
   return (
@@ -50,6 +62,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function dispatchComponentEventPayload(
+  payload: Record<string, unknown>,
+  remotePrefixes?: unknown,
+) {
+  for (const [uid, data] of Object.entries(payload)) {
+    window.dispatchEvent(
+      new CustomEvent("tensorpc-component-event", {
+        detail: {
+          uid: patchLayoutUidWithPrefixes(uid, remotePrefixes),
+          data,
+        },
+      }),
+    );
+  }
+}
+
+function dispatchComponentEvents(ev: AppEventMessage) {
+  for (const [type, payload] of ev.typeToEvents ?? []) {
+    if (type !== AppEventType.ComponentEvent || !isRecord(payload)) {
+      continue;
+    }
+    dispatchComponentEventPayload(payload, ev.remotePrefixes);
+  }
+}
+
 function findFlowComponentUid(layout: LayoutModel | null): string | null {
   if (!layout) return null;
   for (const [uid, comp] of Object.entries(layout.layout)) {
@@ -75,22 +112,48 @@ function terminalContentToString(value: unknown): string {
   }
 }
 
-function sanitizeStartupTerminalContent(content: string) {
-  return content
-    .replace(/node_id_to_remove\s+\[[^\n]*\]/g, "")
-    .replace(/SAVE GRAPH\s+\d+/g, "")
-    .replace(/\n{3,}/g, "\n\n");
+function terminalBufferKey(graphId: string | null | undefined, nodeId: string | null | undefined) {
+  return graphId && nodeId ? `${graphId}@${nodeId}` : "";
 }
 
-function publishStartupTerminalContent(content: string) {
-  const sanitizedContent = sanitizeStartupTerminalContent(content);
-  (window as unknown as { __tensorpcStartupTerminalContent?: string }).__tensorpcStartupTerminalContent =
-    sanitizedContent;
+function publishAppTerminalContent(key: string, content: string) {
+  const globalWindow = window as unknown as {
+    __tensorpcAppTerminalContent?: string;
+    __tensorpcAppTerminalContentByKey?: Record<string, string>;
+  };
+  globalWindow.__tensorpcAppTerminalContentByKey = {
+    ...(globalWindow.__tensorpcAppTerminalContentByKey ?? {}),
+    [key]: content,
+  };
+  globalWindow.__tensorpcAppTerminalContent = content;
   window.dispatchEvent(
-    new CustomEvent("tensorpc-startup-terminal-content", {
-      detail: { content: sanitizedContent },
+    new CustomEvent("tensorpc-app-terminal-content", {
+      detail: { key, content },
     }),
   );
+}
+
+function errorMessageOf(err: unknown) {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function formatLayoutQueryError(err: unknown) {
+  const raw = errorMessageOf(err);
+  const compact = raw.replace(/\s+/g, " ").trim();
+  const status = compact.match(/StatusCode\.([A-Z_]+)/)?.[1];
+  const endpoint = compact.match(/(?:ipv4|ipv6):([^,"]+)/)?.[1]?.trim();
+  const reason = /Socket closed/i.test(compact)
+    ? "socket closed"
+    : /Connect call failed/i.test(compact)
+      ? "connect call failed"
+      : /failed to connect to all addresses/i.test(compact)
+        ? "connect failed"
+        : /FD Shutdown/i.test(compact)
+          ? "fd shutdown"
+          : "RPC failed";
+  const statusText = status ? ` ${status}` : "";
+  const endpointText = endpoint ? ` (${endpoint})` : "";
+  return `app layout service unavailable${statusText}: ${reason}${endpointText}`;
 }
 
 function parseConnectionUrl(wsUrl?: string) {
@@ -126,10 +189,51 @@ function buildConnectionUrl(draft: ReturnType<typeof parseConnectionUrl>) {
   return `ws://${host}${port ? `:${port}` : ""}${normalizedPath}/${clientId}`;
 }
 
+function connectionPortLabel(wsUrl?: string) {
+  const parsed = parseConnectionUrl(wsUrl);
+  return `${parsed.host}:${parsed.port || "default"}`;
+}
+
+function graphLocalStorageKey(connectionUrl?: string) {
+  const parsed = parseConnectionUrl(connectionUrl);
+  const host = parsed.host || "localhost";
+  const port = parsed.port || "default";
+  const pathParts = parsed.path.split("/").filter(Boolean);
+  const stablePath =
+    pathParts.length >= 2 && pathParts.at(-2) === "ws"
+      ? `/${pathParts.slice(0, -1).join("/")}`
+      : parsed.path;
+  const path = stablePath.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `tensorpc-flow-graphs:${host}:${port}:${path}`;
+}
+
+function selectedNodeLocalStorageKey(connectionUrl: string | undefined, graphId: string) {
+  return `${graphLocalStorageKey(connectionUrl)}:selected-node:${graphId}`;
+}
+
+function parseFlowUid(uid: unknown): { graphId: string; nodeId: string } | null {
+  if (typeof uid !== "string") return null;
+  if (!uid.includes("@")) return null;
+  const [graphId = "", nodeId = ""] = uid.split("@");
+  if (!graphId || !nodeId) return null;
+  return { graphId, nodeId };
+}
+
+function nodeIdFromFlowUid(uid: unknown) {
+  const parsed = parseFlowUid(uid);
+  if (!parsed) return "";
+  const { nodeId } = parsed;
+  return nodeId;
+}
+
 function normalizeNodeRuntimeStatus(status: Partial<NodeStatus> | null | undefined): string {
   if (!status) return "idle";
   if (status.sessionStatus === 0 && status.status !== "error") return "running";
   return status.status ?? "idle";
+}
+
+function nodeSessionStopped(status: Partial<NodeStatus> | null | undefined) {
+  return status?.sessionStatus === 1;
 }
 
 function childUidsOf(comp: { props?: Record<string, unknown> } | undefined) {
@@ -185,6 +289,7 @@ function setComputeEditorVisible(
   nodeId: string | null,
 ): LayoutModel | null {
   if (!layout) return layout;
+  if (!findFlowComponentUid(layout)) return layout;
   let changed = false;
   const nextEntries = { ...layout.layout };
 
@@ -253,50 +358,111 @@ function setComputeEditorVisible(
   return changed ? { ...layout, layout: nextEntries } : layout;
 }
 
-function applyEditorDraftValues(
-  layout: LayoutModel | null,
-  drafts: Record<string, string>,
-): LayoutModel | null {
-  if (!layout || Object.keys(drafts).length === 0) return layout;
-  let changed = false;
-  const nextEntries = { ...layout.layout };
-  for (const [uid, comp] of Object.entries(layout.layout)) {
-    if (!comp || comp.type !== 0x2c) continue;
-    const compUid = typeof comp.uid === "string" ? comp.uid : uid;
-    const path = typeof comp.props?.path === "string" ? comp.props.path : "";
-    const value = drafts[uid] ?? drafts[compUid] ?? (path ? drafts[path] : undefined);
-    if (typeof value !== "string" || comp.props?.value === value) continue;
-    nextEntries[uid] = {
-      ...comp,
-      props: {
-        ...comp.props,
-        value,
-      },
-    };
-    changed = true;
-  }
-  return changed ? { ...layout, layout: nextEntries } : layout;
+function computeNodeClassNameFromCode(code: string): string | null {
+  const match = code.match(
+    /^\s*class\s+([A-Za-z_]\w*)\s*\([^)]*(?:^|[.(\s])ComputeNode\b[^)]*\)\s*:/m,
+  );
+  return match?.[1] ?? null;
 }
 
-function cacheEditorDraftValues(
-  layout: LayoutModel | null,
-  drafts: Record<string, string>,
-  overwrite = true,
-) {
-  if (!layout) return;
-  const writeDraft = (key: string | undefined, value: string) => {
-    if (!key) return;
-    if (!overwrite && drafts[key] !== undefined) return;
-    drafts[key] = value;
-  };
-  for (const [uid, comp] of Object.entries(layout.layout)) {
-    if (!comp || comp.type !== 0x2c) continue;
-    const value = comp.props?.value;
-    if (typeof value !== "string" || value.length === 0) continue;
-    writeDraft(uid, value);
-    writeDraft(typeof comp.uid === "string" ? comp.uid : undefined, value);
-    writeDraft(typeof comp.props?.path === "string" ? comp.props.path : undefined, value);
+function collectSubtreeUids(
+  layout: LayoutModel,
+  uid: string,
+  seen = new Set<string>(),
+): string[] {
+  if (!uid || seen.has(uid)) return [];
+  seen.add(uid);
+  const comp = layout.layout[uid];
+  if (!comp) return [];
+  const result = [uid];
+  for (const childUid of childUidsOf(comp)) {
+    result.push(...collectSubtreeUids(layout, childUid, seen));
   }
+  return result;
+}
+
+function syncComputeNodeDisplayName(
+  layout: LayoutModel | null,
+  nodeId: string | null,
+  nextName: string | null,
+): LayoutModel | null {
+  if (!layout || !nodeId || !nextName) return layout;
+  const flowUid = findFlowComponentUid(layout);
+  if (!flowUid) return layout;
+  const flowComp = layout.layout[flowUid];
+  if (!flowComp) return layout;
+  const complex = flowComp.props?.childsComplex;
+  if (!isRecord(complex)) return layout;
+
+  let changed = false;
+  let componentUid = "";
+  const previousNames = new Set(["Custom Node", "AsyncGenCustom"]);
+
+  const patchNodes = (nodes: unknown): unknown => {
+    if (!Array.isArray(nodes)) return nodes;
+    let nodesChanged = false;
+    const nextNodes = nodes.map((node) => {
+      if (!isRecord(node) || String(node.id ?? "") !== nodeId) return node;
+      const data = isRecord(node.data) ? node.data : {};
+      const prevLabel = typeof data.label === "string" ? data.label : "";
+      if (prevLabel) previousNames.add(prevLabel);
+      if (typeof data.component === "string") componentUid = data.component;
+      if (prevLabel === nextName) return node;
+      nodesChanged = true;
+      return {
+        ...node,
+        data: {
+          ...data,
+          label: nextName,
+        },
+      };
+    });
+    if (nodesChanged) changed = true;
+    return nodesChanged ? nextNodes : nodes;
+  };
+
+  const nextComplex: Record<string, unknown> = { ...complex };
+  nextComplex.nodes = patchNodes(complex.nodes);
+  if (isRecord(complex.flow)) {
+    const nextFlow = {
+      ...complex.flow,
+      nodes: patchNodes(complex.flow.nodes),
+    };
+    if (nextFlow.nodes !== complex.flow.nodes) {
+      nextComplex.flow = nextFlow;
+    }
+  }
+
+  const nextEntries = { ...layout.layout };
+  if (changed) {
+    nextEntries[flowUid] = {
+      ...flowComp,
+      props: {
+        ...flowComp.props,
+        childsComplex: nextComplex,
+      },
+    };
+  }
+
+  if (componentUid) {
+    for (const uid of collectSubtreeUids(layout, componentUid)) {
+      const comp = nextEntries[uid] ?? layout.layout[uid];
+      if (!comp || comp.type !== 0x10) continue;
+      const value = comp.props?.value;
+      if (typeof value !== "string") continue;
+      if (value === nextName || !previousNames.has(value)) continue;
+      nextEntries[uid] = {
+        ...comp,
+        props: {
+          ...comp.props,
+          value: nextName,
+        },
+      };
+      changed = true;
+    }
+  }
+
+  return changed ? { ...layout, layout: nextEntries } : layout;
 }
 
 export function FlowEditor({
@@ -315,18 +481,28 @@ export function FlowEditor({
   const isDarkTheme = themeMode === "dark";
   const {
     status,
+    error,
+    reconnectAttempt,
     setUrl,
+    connect,
     disconnect,
     subscribeToAppEvents,
     subscribeToCommandNodeEvents,
+    callSocketRpc,
+    setAppRuntimeTarget,
   } = useContext(TensorPcContext);
   const { setGraphContext } = useContext(LayoutContext);
-  const [rpc] = useState(() => new FlowRpcClient());
+  const rpcRef = useRef<FlowRpcClient | null>(null);
+  if (!rpcRef.current) {
+    rpcRef.current = new FlowRpcClient();
+  }
+  rpcRef.current.setCaller(callSocketRpc);
+  const rpc = rpcRef.current;
   const [graphs, setGraphs] = useState<FlowGraphData[]>([]);
   const [activeGraphId, setActiveGraphId] = useState<string>("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [nodeStatuses, setNodeStatuses] = useState<Record<string, string>>({});
-  const [, setTerminalContent] = useState<string>("");
+  const [terminalContents, setTerminalContents] = useState<Record<string, string>>({});
   const [appLayout, setAppLayout] = useState<LayoutModel | null>(null);
   const [appLayoutNodeId, setAppLayoutNodeId] = useState<string | null>(null);
   const [appTemplates, setAppTemplates] = useState<AppTemplate[]>([]);
@@ -346,17 +522,33 @@ export function FlowEditor({
   const selectedComputeNodeIdRef = useRef<string | null>(null);
   const appLayoutRef = useRef(appLayout);
   const appLayoutNodeIdRef = useRef(appLayoutNodeId);
+  const statusRef = useRef(status);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const appRuntimeRef = useRef<HTMLDivElement>(null);
   const graphMutationTimerRef = useRef<number | null>(null);
   const appRuntimeHydrationKeyRef = useRef("");
+  const appRuntimeHydrationRetryAtRef = useRef(new Map<string, number>());
+  const queryAppStateInFlightRef = useRef(new Map<string, Promise<unknown>>());
   const editorDraftsRef = useRef<Record<string, string>>({});
+  const computeNodeNamePatchesRef = useRef<Record<string, string>>({});
 
   const preserveEditorDrafts = useCallback((layout: LayoutModel | null) => {
-    cacheEditorDraftValues(appLayoutRef.current, editorDraftsRef.current, false);
-    cacheEditorDraftValues(layout, editorDraftsRef.current, false);
-    return applyEditorDraftValues(layout, editorDraftsRef.current);
+    let nextLayout = layout;
+    for (const [nodeId, className] of Object.entries(computeNodeNamePatchesRef.current)) {
+      nextLayout = syncComputeNodeDisplayName(nextLayout, nodeId, className);
+    }
+    return nextLayout;
   }, []);
+
+  const clearAppRuntime = useCallback((nodeId: string) => {
+    setNodeStatuses((prev) => (prev[nodeId] === "idle" ? prev : { ...prev, [nodeId]: "idle" }));
+    if (appLayoutNodeIdRef.current === nodeId) {
+      setAppLayout(null);
+      setAppLayoutNodeId(null);
+      setAppRuntimeTarget(null);
+      selectedComputeNodeIdRef.current = null;
+    }
+  }, [setAppRuntimeTarget]);
 
   useEffect(() => {
     activeGraphIdRef.current = activeGraphId;
@@ -365,6 +557,10 @@ export function FlowEditor({
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
   }, [selectedNodeId]);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     appLayoutRef.current = appLayout;
@@ -399,9 +595,20 @@ export function FlowEditor({
       const custom = event as CustomEvent<{ uid?: string; path?: string; value?: string }>;
       const uid = custom.detail?.uid;
       const path = custom.detail?.path;
-      if (typeof custom.detail?.value !== "string") return;
-      if (uid) editorDraftsRef.current[uid] = custom.detail.value;
-      if (path) editorDraftsRef.current[path] = custom.detail.value;
+      const value = custom.detail?.value;
+      if (typeof value !== "string") return;
+      if (uid) editorDraftsRef.current[uid] = value;
+      if (path) editorDraftsRef.current[path] = value;
+      const className = computeNodeClassNameFromCode(value);
+      const computeNodeId = selectedComputeNodeIdRef.current;
+      if (className && computeNodeId) {
+        computeNodeNamePatchesRef.current[computeNodeId] = className;
+        setAppLayout((current) =>
+          preserveEditorDrafts(
+            syncComputeNodeDisplayName(current, computeNodeId, className),
+          ),
+        );
+      }
     };
     window.addEventListener("tensorpc-monaco-value-change", handleEditorDraft);
     return () => {
@@ -409,8 +616,27 @@ export function FlowEditor({
     };
   }, []);
 
+  useEffect(() => {
+    if (!statusMsg) return undefined;
+    const timer = window.setTimeout(() => {
+      setStatusMsg("");
+    }, 10_000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [statusMsg]);
+
+  useEffect(() => {
+    for (const [key, content] of Object.entries(terminalContents)) {
+      publishAppTerminalContent(key, content);
+    }
+  }, [terminalContents]);
+
   // ── localStorage helpers ──
-  const LS_KEY = "tensorpc-flow-graphs";
+  const LS_KEY = useMemo(
+    () => graphLocalStorageKey(connectionUrl),
+    [connectionUrl],
+  );
 
   const saveToLocal = useCallback((gList: FlowGraphData[]) => {
     try {
@@ -422,12 +648,11 @@ export function FlowEditor({
       const kb = (json.length / 1024).toFixed(1);
       console.log(`💾 Saved to localStorage: ${gList.length} graphs, ${nodeCount} nodes (${kb} KB) verify=${verify ? 'OK' : 'FAIL'}`);
       setStatusMsg(`💾 Saved ${nodeCount} nodes locally (${kb} KB)`);
-      setTimeout(() => setStatusMsg(""), 3000);
     } catch (e) {
       console.error("localStorage save failed:", e);
       setStatusMsg(`❌ Save failed: ${e}`);
     }
-  }, []);
+  }, [LS_KEY]);
 
   const loadFromLocal = useCallback((): FlowGraphData[] | null => {
     try {
@@ -444,7 +669,7 @@ export function FlowEditor({
       console.error("localStorage load failed:", e);
       return null;
     }
-  }, []);
+  }, [LS_KEY]);
 
   // Show locally saved graphs immediately, even before the backend connection
   // finishes. The backend load below can replace this if it has real data.
@@ -532,64 +757,132 @@ export function FlowEditor({
         uid: ev.uid,
         types: ev.typeToEvents?.map(([t]) => t) ?? [],
       });
+      const eventContext = parseFlowUid(ev.uid);
+      if (
+        eventContext?.graphId &&
+        activeGraphIdRef.current &&
+        eventContext.graphId !== activeGraphIdRef.current
+      ) {
+        return;
+      }
+      const eventNodeId = eventContext?.nodeId ?? "";
+      const selectedRuntimeNodeId = selectedNodeIdRef.current;
+      const displayedRuntimeNodeId = appLayoutNodeIdRef.current;
+      const eventTargetsCurrentRuntime =
+        !eventNodeId ||
+        eventNodeId === selectedRuntimeNodeId ||
+        eventNodeId === displayedRuntimeNodeId;
+      if (!eventTargetsCurrentRuntime) {
+        dispatchComponentEvents(ev);
+        return;
+      }
       const lay = extractUpdateLayout(ev);
       if (lay) {
         console.log("FlowEditor: UpdateLayout found!", lay);
-        const [, eventNodeId] = String(ev.uid ?? "").split("@");
         const appNodeId = eventNodeId || selectedNodeIdRef.current;
+        const nextLayout = preserveEditorDrafts(setComputeEditorVisible(lay, null));
         if (activeGraphIdRef.current && appNodeId) {
-          setGraphContext(activeGraphIdRef.current, appNodeId);
+          const graphId = activeGraphIdRef.current;
+          void (async () => {
+            try {
+              const urls = await rpc.queryAppNodeUrls(graphId, appNodeId);
+              const rpcUrl = typeof urls?.http_url === "string" ? urls.http_url : "";
+              setAppRuntimeTarget(
+                rpcUrl
+                  ? {
+                      graphId,
+                      nodeId: appNodeId,
+                      rpcUrl,
+                    }
+                  : null,
+              );
+            } catch {
+              setAppRuntimeTarget(null);
+            }
+            setAppLayout(nextLayout);
+          })();
+          setGraphContext(graphId, appNodeId);
           setAppLayoutNodeId(appNodeId);
           setNodeStatuses((prev) => ({ ...prev, [appNodeId]: "running" }));
+        } else {
+          setAppLayout(nextLayout);
         }
-        setAppLayout(preserveEditorDrafts(setComputeEditorVisible(lay, null)));
-      } else {
-        for (const [type, payload] of ev.typeToEvents ?? []) {
-          if (type === AppEventType.UpdateComponents) {
-            setAppLayout((current) => preserveEditorDrafts(applyUpdateComponents(current, payload)));
-          } else if (type === AppEventType.ComponentEvent && isRecord(payload)) {
-            for (const [uid, data] of Object.entries(payload)) {
-              window.dispatchEvent(
-                new CustomEvent("tensorpc-component-event", {
-                  detail: { uid, data },
-                }),
-              );
-            }
-          }
+      }
+      for (const [type, payload] of ev.typeToEvents ?? []) {
+        if (type === AppEventType.UpdateComponents) {
+          setAppLayout((current) =>
+            preserveEditorDrafts(applyUpdateComponents(current, payload, ev.remotePrefixes)),
+          );
+        } else if (type === AppEventType.UIUpdateEvent) {
+          setAppLayout((current) =>
+            preserveEditorDrafts(applyUiUpdateEvent(current, payload, ev.remotePrefixes, "props")),
+          );
+        } else if (type === AppEventType.UIUpdateBasePropsEvent) {
+          setAppLayout((current) =>
+            preserveEditorDrafts(applyUiUpdateEvent(current, payload, ev.remotePrefixes, "base")),
+          );
+        } else if (type === AppEventType.UIUpdateUsedEvents) {
+          setAppLayout((current) =>
+            preserveEditorDrafts(applyUpdateUsedEvents(current, payload, ev.remotePrefixes)),
+          );
+        } else if (type === AppEventType.ComponentEvent && isRecord(payload)) {
+          setAppLayout((current) =>
+            preserveEditorDrafts(applyDataModelComponentEvents(current, payload, ev.remotePrefixes)),
+          );
+          dispatchComponentEventPayload(payload, ev.remotePrefixes);
         }
+      }
+      if (!lay) {
         console.log("FlowEditor: no UpdateLayout in this event");
       }
     });
 
     subscribeToCommandNodeEvents((ev) => {
-      const selectedUid =
-        activeGraphIdRef.current && selectedNodeIdRef.current
-          ? `${activeGraphIdRef.current}@${selectedNodeIdRef.current}`
-          : "";
-      if (!selectedUid || ev.uid !== selectedUid || !isRecord(ev.data)) return;
+      const graphId = activeGraphIdRef.current;
+      const candidateNodeIds = [
+        selectedNodeIdRef.current,
+        appLayoutNodeIdRef.current,
+      ].filter((id): id is string => typeof id === "string" && id.length > 0);
+      const matchesActiveRuntime =
+        Boolean(graphId) &&
+        candidateNodeIds.some((nodeId) => ev.uid === `${graphId}@${nodeId}`);
+      if (!matchesActiveRuntime || !isRecord(ev.data)) return;
       if (ev.data.type === "R" && "raw" in ev.data) {
         const text = terminalContentToString(ev.data.raw);
         if (!text) return;
-        setTerminalContent((current) => {
-          const next = current + text;
-          publishStartupTerminalContent(next);
-          return next;
+        const eventNodeId = nodeIdFromFlowUid(ev.uid);
+        const key = terminalBufferKey(graphId, eventNodeId);
+        if (!key) return;
+        setTerminalContents((current) => {
+          const next = (current[key] ?? "") + text;
+          publishAppTerminalContent(key, next);
+          return { ...current, [key]: next };
         });
       } else if (ev.data.type === "Eof") {
-        setTerminalContent((current) => {
-          const next = `${current}\n[process exited]\n`;
-          publishStartupTerminalContent(next);
-          return next;
+        const eventNodeId = nodeIdFromFlowUid(ev.uid) || selectedNodeIdRef.current;
+        if (eventNodeId) clearAppRuntime(eventNodeId);
+        const key = terminalBufferKey(graphId, eventNodeId);
+        if (!key) return;
+        setTerminalContents((current) => {
+          const next = `${current[key] ?? ""}\n[process exited]\n`;
+          publishAppTerminalContent(key, next);
+          return { ...current, [key]: next };
         });
       }
     });
-  }, [status, rpc, setGraphContext, subscribeToAppEvents, subscribeToCommandNodeEvents]);
+  }, [status, rpc, setGraphContext, subscribeToAppEvents, subscribeToCommandNodeEvents, clearAppRuntime]);
 
   const activeGraph = graphs.find((g) => g.id === activeGraphId) ?? null;
   const allNodes = activeGraph?.nodes ?? [];
   const selectedNode = allNodes.find((n) => n.id === selectedNodeId) ?? null;
-  const appNodes = allNodes.filter((node) => node.type === "app");
-  const sshNodes = allNodes.filter((node) => node.type === "directssh");
+  const appNodes = useMemo(
+    () => allNodes.filter((node) => node.type === "app"),
+    [allNodes],
+  );
+  const sshNodes = useMemo(
+    () => allNodes.filter((node) => node.type === "directssh"),
+    [allNodes],
+  );
   const selectedFlowNode = selectedNode ?? appNodes[0] ?? sshNodes[0] ?? allNodes[0] ?? null;
   const currentAppNode =
     (selectedNode?.type === "app" ? selectedNode : null) ??
@@ -598,52 +891,189 @@ export function FlowEditor({
     null;
 
   useEffect(() => {
+    if (status !== "connected" || !activeGraph || !appLayoutNodeId) {
+      setAppRuntimeTarget(null);
+      return;
+    }
+
+    let cancelled = false;
+    void rpc
+      .queryAppNodeUrls(activeGraph.id, appLayoutNodeId)
+      .then((urls) => {
+        if (cancelled) return;
+        const rpcUrl = typeof urls?.http_url === "string" ? urls.http_url : "";
+        if (!rpcUrl) {
+          setAppRuntimeTarget(null);
+          return;
+        }
+        setAppRuntimeTarget({
+          graphId: activeGraph.id,
+          nodeId: appLayoutNodeId,
+          rpcUrl,
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.warn("queryAppNodeUrls failed:", err);
+          setAppRuntimeTarget(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeGraph, appLayoutNodeId, rpc, setAppRuntimeTarget, status]);
+
+  const queryAppState = useCallback(
+    async (graphId: string, nodeId: string) => {
+      const key = `${graphId}@${nodeId}`;
+      const existing = queryAppStateInFlightRef.current.get(key);
+      if (existing) {
+        return existing;
+      }
+      const pending = (async () => {
+        try {
+          return await callSocketRpc(
+            `${FLOW_SERVICE_PREFIX}.query_app_state`,
+            [graphId, nodeId],
+            60_000,
+          );
+        } catch (err) {
+          throw err;
+        } finally {
+          queryAppStateInFlightRef.current.delete(key);
+        }
+      })();
+      queryAppStateInFlightRef.current.set(key, pending);
+      return pending;
+    },
+    [callSocketRpc],
+  );
+
+  useEffect(() => {
+    if (status !== "connected" || !activeGraph || appNodes.length === 0) return;
+
+    let cancelled = false;
+    const appNodeIds = appNodes.map((node) => node.id);
+
+    const syncAppStatuses = async () => {
+      await Promise.all(
+        appNodeIds.map(async (nodeId) => {
+          try {
+            const nodeStatus = await rpc.queryNodeStatus(activeGraph.id, nodeId);
+            if (cancelled) return;
+            const runtimeStatus = normalizeNodeRuntimeStatus(nodeStatus);
+            if (nodeSessionStopped(nodeStatus)) {
+              clearAppRuntime(nodeId);
+              return;
+            }
+            setNodeStatuses((prev) =>
+              prev[nodeId] === runtimeStatus ? prev : { ...prev, [nodeId]: runtimeStatus },
+            );
+          } catch (err) {
+            console.warn("queryNodeStatus during app status sync failed:", err);
+          }
+        }),
+      );
+    };
+
+    void syncAppStatuses();
+    const interval = window.setInterval(() => void syncAppStatuses(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeGraph, appNodes, clearAppRuntime, rpc, status]);
+
+  useEffect(() => {
     if (selectedNodeId || !activeGraph) return;
-    const defaultNode = activeGraph.nodes.find((node) => node.type === "app") ?? activeGraph.nodes[0];
+    const storedNodeId = localStorage.getItem(
+      selectedNodeLocalStorageKey(connectionUrl, activeGraph.id),
+    );
+    const storedNode = storedNodeId
+      ? activeGraph.nodes.find((node) => node.id === storedNodeId)
+      : null;
+    const defaultNode =
+      storedNode ?? activeGraph.nodes.find((node) => node.type === "app") ?? activeGraph.nodes[0];
     if (defaultNode) setSelectedNodeId(defaultNode.id);
-  }, [activeGraph, selectedNodeId]);
+  }, [activeGraph, connectionUrl, selectedNodeId]);
+
+  useEffect(() => {
+    if (!activeGraphId || !selectedNodeId) return;
+    localStorage.setItem(
+      selectedNodeLocalStorageKey(connectionUrl, activeGraphId),
+      selectedNodeId,
+    );
+  }, [activeGraphId, connectionUrl, selectedNodeId]);
 
   const hydrateAppRuntime = useCallback(
-    async (graphId: string, appNode: FlowNode) => {
+    async (
+      graphId: string,
+      appNode: FlowNode,
+      options: { refreshTerminal?: boolean; showErrors?: boolean } = {},
+    ) => {
       if (appNode.type !== "app") return false;
 
       setGraphContext(graphId, appNode.id);
-      let runtimeStatus = nodeStatuses[appNode.id] ?? "idle";
+      let runtimeStatus = "idle";
 
       try {
         const nodeStatus = await rpc.queryNodeStatus(graphId, appNode.id);
         runtimeStatus = normalizeNodeRuntimeStatus(nodeStatus);
-        setNodeStatuses((prev) => ({ ...prev, [appNode.id]: runtimeStatus }));
-        if (nodeStatus.sessionStatus === 1) {
-          if (appLayoutNodeIdRef.current === appNode.id) {
-            setAppLayout(null);
-            setAppLayoutNodeId(null);
-          }
+        setNodeStatuses((prev) =>
+          prev[appNode.id] === runtimeStatus ? prev : { ...prev, [appNode.id]: runtimeStatus },
+        );
+        if (nodeSessionStopped(nodeStatus)) {
+          clearAppRuntime(appNode.id);
           return false;
+        }
+        if (options.refreshTerminal !== false) {
+          void rpc
+            .selectNode(
+              graphId,
+              appNode.id,
+              TERMINAL_SNAPSHOT_WIDTH,
+              TERMINAL_SNAPSHOT_HEIGHT,
+            )
+            .then((payload) => {
+              const key = terminalBufferKey(graphId, appNode.id);
+              const content = terminalContentToString(payload);
+              setTerminalContents((current) => ({ ...current, [key]: content }));
+              publishAppTerminalContent(key, content);
+            })
+            .catch((err) => {
+              console.warn("selectNode during app runtime hydrate failed:", err);
+            });
         }
       } catch (err) {
         console.warn("queryNodeStatus during app runtime hydrate failed:", err);
       }
 
       try {
-        const content = terminalContentToString(
-          await rpc.selectNode(graphId, appNode.id, 120, 30),
-        );
-        setTerminalContent(content);
-        publishStartupTerminalContent(content);
-      } catch {
-        // Some app sessions may not have terminal scrollback yet.
-      }
-
-      try {
         const layoutState = normalizeLayoutPayload(
-          await rpc.queryAppState(graphId, appNode.id),
+          await queryAppState(graphId, appNode.id),
         );
         if (!layoutState) {
-          if (runtimeStatus === "running") {
+          if (options.showErrors && runtimeStatus === "running") {
             setStatusMsg(`App ${appNode.data.readableNodeId || appNode.id} is running; waiting for layout...`);
           }
           return false;
+        }
+        try {
+          const urls = await rpc.queryAppNodeUrls(graphId, appNode.id);
+          const rpcUrl = typeof urls?.http_url === "string" ? urls.http_url : "";
+          setAppRuntimeTarget(
+            rpcUrl
+              ? {
+                  graphId,
+                  nodeId: appNode.id,
+                  rpcUrl,
+                }
+              : null,
+          );
+        } catch (err) {
+          console.warn("queryAppNodeUrls during app runtime hydrate failed:", err);
+          setAppRuntimeTarget(null);
         }
         setGraphContext(graphId, appNode.id);
         setAppLayoutNodeId(appNode.id);
@@ -656,32 +1086,115 @@ export function FlowEditor({
         return true;
       } catch (err) {
         console.warn("queryAppState during app runtime hydrate failed:", err);
-        if (runtimeStatus === "running") {
+        if (options.showErrors && runtimeStatus === "running") {
           setStatusMsg(
-            `App ${appNode.data.readableNodeId || appNode.id} is running, but layout query failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
+            `App ${appNode.data.readableNodeId || appNode.id} is running, but layout query failed: ${formatLayoutQueryError(err)}`,
           );
         }
         return false;
       }
     },
-    [nodeStatuses, rpc, setGraphContext],
+    [
+      clearAppRuntime,
+      preserveEditorDrafts,
+      queryAppState,
+      rpc,
+      setAppRuntimeTarget,
+      setGraphContext,
+    ],
+  );
+
+  const waitForMasterSocket = useCallback(async () => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (statusRef.current === "connected" && window.__tensorpcDevflowWs?.isConnected) {
+        return true;
+      }
+      if (statusRef.current === "idle" || statusRef.current === "error") {
+        void connect();
+      }
+      await delay(500);
+    }
+    return statusRef.current === "connected" && Boolean(window.__tensorpcDevflowWs?.isConnected);
+  }, [connect]);
+
+  const restartAppRuntime = useCallback(
+    async (graphId: string, appNode: FlowNode) => {
+      setStatusMsg(`Remote component event failed; restarting ${appNode.data.readableNodeId || appNode.id}...`);
+      const ready = await waitForMasterSocket();
+      if (!ready) {
+        setStatusMsg(`Remote component reconnect failed: Flow master is not connected`);
+        return false;
+      }
+
+      try {
+        await rpc.stopSession(graphId, appNode.id);
+      } catch (err) {
+        console.warn("stopSession during remote reconnect fallback failed:", err);
+      }
+
+      clearAppRuntime(appNode.id);
+      await delay(500);
+
+      try {
+        await rpc.startNode(graphId, appNode.id);
+        setNodeStatuses((prev) => ({ ...prev, [appNode.id]: "running" }));
+        appRuntimeHydrationRetryAtRef.current.delete(`${graphId}@${appNode.id}@running`);
+        return true;
+      } catch (err) {
+        console.warn("startNode during remote reconnect fallback failed:", err);
+        setStatusMsg(
+          `Remote component reconnect failed: ${errorMessageOf(err).replace(/\s+/g, " ").trim()}`,
+        );
+        return false;
+      }
+    },
+    [clearAppRuntime, rpc, waitForMasterSocket],
   );
 
   useEffect(() => {
     if (status !== "connected" || !activeGraph || selectedFlowNode?.type !== "app") return;
-    if (appLayout && appLayoutNodeId === selectedFlowNode.id) return;
-    const key = `${activeGraph.id}@${selectedFlowNode.id}@${nodeStatuses[selectedFlowNode.id] ?? ""}`;
-    if (appRuntimeHydrationKeyRef.current === key) return;
-    appRuntimeHydrationKeyRef.current = key;
+    const selectedRuntimeStatus = nodeStatuses[selectedFlowNode.id] ?? "idle";
+    if (appLayout && appLayoutNodeId === selectedFlowNode.id) {
+      return;
+    }
+    const key = `${activeGraph.id}@${selectedFlowNode.id}@${selectedRuntimeStatus}`;
+    const pendingKey = `pending:${key}`;
+    const retryAt = appRuntimeHydrationRetryAtRef.current.get(key) ?? 0;
+    if (retryAt > Date.now()) {
+      return;
+    }
+    if (
+      appRuntimeHydrationKeyRef.current === key ||
+      appRuntimeHydrationKeyRef.current === pendingKey
+    ) {
+      return;
+    }
+    appRuntimeHydrationKeyRef.current = pendingKey;
     let cancelled = false;
+    let started = false;
     const timer = window.setTimeout(() => {
-      if (!cancelled) void hydrateAppRuntime(activeGraph.id, selectedFlowNode);
+      started = true;
+      if (!cancelled) {
+        void hydrateAppRuntime(activeGraph.id, selectedFlowNode).then((loaded) => {
+          if (cancelled) return;
+          if (loaded) {
+            appRuntimeHydrationRetryAtRef.current.delete(key);
+            appRuntimeHydrationKeyRef.current = key;
+          } else {
+            appRuntimeHydrationRetryAtRef.current.set(key, Date.now() + 10_000);
+            appRuntimeHydrationKeyRef.current = "";
+          }
+        });
+      }
     }, 80);
     return () => {
-      cancelled = true;
       window.clearTimeout(timer);
+      if (!started) {
+        cancelled = true;
+      }
+      if (!started && appRuntimeHydrationKeyRef.current === pendingKey) {
+        appRuntimeHydrationKeyRef.current = "";
+      }
     };
   }, [
     activeGraph,
@@ -694,23 +1207,84 @@ export function FlowEditor({
   ]);
 
   useEffect(() => {
+    const handleRemoteReconnect = (event: Event) => {
+      const graph = activeGraphIdRef.current;
+      const nodeId =
+        (selectedFlowNode?.type === "app" ? selectedFlowNode.id : null) ??
+        appLayoutNodeIdRef.current;
+      const appNode = nodeId
+        ? appNodes.find((node) => node.id === nodeId)
+        : null;
+      if (!graph || !appNode) return;
+
+      appRuntimeHydrationKeyRef.current = "";
+      appRuntimeHydrationRetryAtRef.current.delete(`${graph}@${appNode.id}@running`);
+      queryAppStateInFlightRef.current.delete(`${graph}@${appNode.id}`);
+      setStatusMsg(`Reconnecting ${appNode.data.readableNodeId || appNode.id} remote component...`);
+
+      void (async () => {
+        const detail = (event as CustomEvent<{ sent?: Promise<boolean> }>).detail;
+        if (detail?.sent) {
+          const accepted = await detail.sent.catch(() => false);
+          if (!accepted) {
+            const restarted = await restartAppRuntime(graph, appNode);
+            if (!restarted) return;
+            await delay(800);
+          }
+        }
+        setAppRuntimeTarget(null);
+        setAppLayout(null);
+        setAppLayoutNodeId(appNode.id);
+        await delay(250);
+        for (let attempt = 0; attempt < 12; attempt++) {
+          queryAppStateInFlightRef.current.delete(`${graph}@${appNode.id}`);
+          const loaded = await hydrateAppRuntime(graph, appNode, {
+            refreshTerminal: attempt === 0,
+            showErrors: attempt === 0,
+          });
+          if (loaded) {
+            setStatusMsg(`Remote component reconnected`);
+            return;
+          }
+          await delay(500);
+        }
+        setStatusMsg(`Remote component reconnect requested; layout is still unavailable`);
+      })();
+    };
+
+    window.addEventListener("tensorpc-remote-component-reconnect", handleRemoteReconnect);
+    return () => {
+      window.removeEventListener("tensorpc-remote-component-reconnect", handleRemoteReconnect);
+    };
+  }, [appNodes, hydrateAppRuntime, restartAppRuntime, selectedFlowNode, setAppRuntimeTarget]);
+
+  useEffect(() => {
     if (!activeGraph || !selectedNode) {
-      setTerminalContent("");
       return;
     }
-    if (selectedNode.type !== "app" && selectedNode.type !== "command") return;
+    if (selectedNode.type !== "command" && selectedNode.type !== "app") return;
 
     let cancelled = false;
     void rpc
-      .selectNode(activeGraph.id, selectedNode.id, 120, 30)
+      .selectNode(
+        activeGraph.id,
+        selectedNode.id,
+        TERMINAL_SNAPSHOT_WIDTH,
+        TERMINAL_SNAPSHOT_HEIGHT,
+      )
       .then((payload) => {
         if (cancelled) return;
         const content = terminalContentToString(payload);
-        setTerminalContent(content);
-        if (selectedNode.type === "app") publishStartupTerminalContent(content);
+        const key = terminalBufferKey(activeGraph.id, selectedNode.id);
+        setTerminalContents((current) => ({ ...current, [key]: content }));
+        publishAppTerminalContent(key, content);
       })
       .catch(() => {
-        if (!cancelled) setTerminalContent("");
+        if (!cancelled) {
+          const key = terminalBufferKey(activeGraph.id, selectedNode.id);
+          setTerminalContents((current) => ({ ...current, [key]: "" }));
+          publishAppTerminalContent(key, "");
+        }
       });
 
     return () => {
@@ -752,7 +1326,7 @@ export function FlowEditor({
             FrontendEventType.FlowSelectionChange,
             { nodes: [nodeId], edges: [] },
           )
-          .then(() => rpc.queryAppState(graphId, appNodeId))
+          .then(() => queryAppState(graphId, appNodeId))
           .then((payload) => {
             const layoutState = normalizeLayoutPayload(payload);
             if (layoutState) {
@@ -767,7 +1341,7 @@ export function FlowEditor({
     return () => {
       window.removeEventListener("tensorpc-flow-node-selection", handleSelection);
     };
-  }, [rpc]);
+  }, [queryAppState, rpc]);
 
   useEffect(() => {
     const handleGraphMutation = () => {
@@ -779,8 +1353,7 @@ export function FlowEditor({
         const graphId = activeGraphIdRef.current;
         const appNodeId = selectedNodeIdRef.current;
         if (!graphId || !appNodeId) return;
-        void rpc
-          .queryAppState(graphId, appNodeId)
+        void queryAppState(graphId, appNodeId)
           .then((payload) => {
             const layoutState = normalizeLayoutPayload(payload);
             if (layoutState) {
@@ -806,7 +1379,7 @@ export function FlowEditor({
         graphMutationTimerRef.current = null;
       }
     };
-  }, [rpc]);
+  }, [queryAppState]);
 
   // ── Node operations ──
 
@@ -926,64 +1499,71 @@ export function FlowEditor({
   }, [graphs, saveToLocal]);
 
   const handleStartNode = useCallback(async () => {
-    if (!selectedNode || !activeGraph) {
-      console.warn("Start: no node selected or no active graph", { selectedNode, activeGraph });
+    const targetNode =
+      selectedFlowNode?.type === "app" || selectedFlowNode?.type === "command"
+        ? selectedFlowNode
+        : selectedNode;
+    if (!targetNode || !activeGraph) {
+      console.warn("Start: no node selected or no active graph", {
+        selectedNode,
+        selectedFlowNode,
+        activeGraph,
+      });
       return;
     }
-    console.log(`Start: ${selectedNode.type} node ${selectedNode.id} on graph ${activeGraph.id}`);
+    const label = targetNode.data.readableNodeId || targetNode.id;
+    console.log(`Start: ${targetNode.type} node ${targetNode.id} on graph ${activeGraph.id}`);
     try {
+      setStatusMsg(`Starting ${label}...`);
+      if (targetNode.type === "app") {
+        setGraphContext(activeGraph.id, targetNode.id);
+      }
       await rpc.saveGraph(activeGraph.id, activeGraph);
-      await rpc.startNode(activeGraph.id, selectedNode.id);
+      await rpc.startNode(activeGraph.id, targetNode.id);
       console.log(`Start: success`);
-      setNodeStatuses((prev) => ({ ...prev, [selectedNode.id]: "running" }));
-      setStatusMsg(`▶ Started ${selectedNode.data.readableNodeId || selectedNode.id}`);
+      setNodeStatuses((prev) => ({ ...prev, [targetNode.id]: "running" }));
+      setStatusMsg(`▶ Started ${label}`);
 
-      if (selectedNode.type === "app") {
-        setGraphContext(activeGraph.id, selectedNode.id);
-        const startupContent = terminalContentToString(
-          await rpc.selectNode(activeGraph.id, selectedNode.id, 120, 30).catch(() => ""),
-        );
-        if (startupContent) {
-          setTerminalContent(startupContent);
-          publishStartupTerminalContent(startupContent);
-        }
-        setStatusMsg(`▶ Started ${selectedNode.data.readableNodeId || selectedNode.id}; waiting for layout...`);
+      if (targetNode.type === "app") {
+        setStatusMsg(`▶ Started ${label}; waiting for layout...`);
         let loadedLayout = false;
         let lastLayoutError = "";
         for (let i = 0; i < 30; i++) {
-          const nodeStatus = await rpc.queryNodeStatus(activeGraph.id, selectedNode.id);
+          const nodeStatus = await rpc.queryNodeStatus(activeGraph.id, targetNode.id);
           setNodeStatuses((prev) => ({
             ...prev,
-            [selectedNode.id]: normalizeNodeRuntimeStatus(nodeStatus),
+            [targetNode.id]: normalizeNodeRuntimeStatus(nodeStatus),
           }));
-          if (nodeStatus.sessionStatus === 1) {
-            const content = terminalContentToString(
-              await rpc.selectNode(activeGraph.id, selectedNode.id, 120, 30).catch(() => ""),
-            );
-            if (content) {
-              setTerminalContent(content);
-              publishStartupTerminalContent(content);
-            }
+          if (nodeSessionStopped(nodeStatus)) {
             setStatusMsg(`⚠️ App session stopped before layout was available`);
             break;
           }
           const layoutState = normalizeLayoutPayload(
-            await rpc.queryAppState(activeGraph.id, selectedNode.id).catch((err) => {
+            await queryAppState(activeGraph.id, targetNode.id).catch((err) => {
               console.warn(`queryAppState attempt ${i + 1} failed:`, err);
-              lastLayoutError = err instanceof Error ? err.message : String(err);
+              lastLayoutError = formatLayoutQueryError(err);
               return null;
             }),
           );
           if (layoutState) {
-            setGraphContext(activeGraph.id, selectedNode.id);
-            const latestContent = terminalContentToString(
-              await rpc.selectNode(activeGraph.id, selectedNode.id, 120, 30).catch(() => ""),
-            );
-            if (latestContent) {
-              setTerminalContent(latestContent);
-              publishStartupTerminalContent(latestContent);
+            try {
+              const urls = await rpc.queryAppNodeUrls(activeGraph.id, targetNode.id);
+              const rpcUrl = typeof urls?.http_url === "string" ? urls.http_url : "";
+              setAppRuntimeTarget(
+                rpcUrl
+                  ? {
+                      graphId: activeGraph.id,
+                      nodeId: targetNode.id,
+                      rpcUrl,
+                    }
+                  : null,
+              );
+            } catch (err) {
+              console.warn("queryAppNodeUrls during start failed:", err);
+              setAppRuntimeTarget(null);
             }
-            setAppLayoutNodeId(selectedNode.id);
+            setGraphContext(activeGraph.id, targetNode.id);
+            setAppLayoutNodeId(targetNode.id);
             setAppLayout(preserveEditorDrafts(setComputeEditorVisible(layoutState, null)));
             setStatusMsg(`✅ App layout loaded`);
             loadedLayout = true;
@@ -1003,7 +1583,16 @@ export function FlowEditor({
       console.warn("Start: failed", e);
       setStatusMsg(`❌ Start failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [selectedNode, activeGraph, rpc, setGraphContext]);
+  }, [
+    activeGraph,
+    preserveEditorDrafts,
+    queryAppState,
+    rpc,
+    selectedFlowNode,
+    selectedNode,
+    setGraphContext,
+    setAppRuntimeTarget,
+  ]);
 
   const handleStopNode = useCallback(async () => {
     const appNode =
@@ -1011,18 +1600,39 @@ export function FlowEditor({
       (selectedNode?.type === "app" ? selectedNode : null) ??
       currentAppNode;
     if (!appNode || !activeGraph) return;
+    const label = appNode.data.readableNodeId || appNode.id;
+    const waitForStop = async (attempts: number, intervalMs: number) => {
+      for (let i = 0; i < attempts; i++) {
+        await delay(intervalMs);
+        const status = await rpc.queryNodeStatus(activeGraph.id, appNode.id);
+        const runtimeStatus = normalizeNodeRuntimeStatus(status);
+        setNodeStatuses((prev) => ({ ...prev, [appNode.id]: runtimeStatus }));
+        if (nodeSessionStopped(status)) return true;
+      }
+      return false;
+    };
+
     try {
+      setStatusMsg(`Stopping ${label}...`);
       await rpc.stopNode(activeGraph.id, appNode.id);
-      setNodeStatuses((prev) => ({ ...prev, [appNode.id]: "idle" }));
-      setAppLayout(null);
-      setAppLayoutNodeId(null);
-      selectedComputeNodeIdRef.current = null;
-      setStatusMsg(`Stopped ${appNode.data.readableNodeId || appNode.id}`);
+      let stopped = await waitForStop(6, 500);
+      if (!stopped) {
+        setStatusMsg(`Stopping ${label} session...`);
+        await rpc.stopSession(activeGraph.id, appNode.id);
+        stopped = await waitForStop(8, 500);
+      }
+      if (!stopped) {
+        clearAppRuntime(appNode.id);
+        setStatusMsg(`Stop session sent for ${label}`);
+        return;
+      }
+      clearAppRuntime(appNode.id);
+      setStatusMsg(`Stopped ${label}`);
     } catch (e) {
       console.warn("Failed to stop node:", e);
       setStatusMsg(`Stop app failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [activeGraph, currentAppNode, rpc, selectedFlowNode, selectedNode]);
+  }, [activeGraph, clearAppRuntime, currentAppNode, rpc, selectedFlowNode, selectedNode]);
 
   const handleStopSession = useCallback(async () => {
     const appNode =
@@ -1036,15 +1646,13 @@ export function FlowEditor({
     }
     try {
       await rpc.stopSession(activeGraph.id, appNode.id);
-      setAppLayout(null);
-      setAppLayoutNodeId(null);
-      selectedComputeNodeIdRef.current = null;
+      clearAppRuntime(appNode.id);
       setStatusMsg(`Stopped session ${appNode.data.readableNodeId || appNode.id}`);
     } catch (e) {
       console.warn("Failed to stop app session:", e);
       setStatusMsg(`Stop session failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [activeGraph, currentAppNode, rpc, selectedFlowNode]);
+  }, [activeGraph, clearAppRuntime, currentAppNode, rpc, selectedFlowNode]);
 
   const handleFullscreenApp = useCallback(() => {
     const elem = workspaceRef.current ?? document.documentElement;
@@ -1082,13 +1690,19 @@ export function FlowEditor({
       setSshSettingsNodeId(node?.type === "directssh" ? nodeId : null);
 
       if (nodeId && activeGraph) {
-        if (node?.type === "command" || node?.type === "app") {
+        if (node?.type === "command") {
           try {
             const content = terminalContentToString(
-              await rpc.selectNode(activeGraph.id, nodeId, 120, 30),
+              await rpc.selectNode(
+                activeGraph.id,
+                nodeId,
+                TERMINAL_SNAPSHOT_WIDTH,
+                TERMINAL_SNAPSHOT_HEIGHT,
+              ),
             );
-            setTerminalContent(content);
-            if (node.type === "app") publishStartupTerminalContent(content);
+            const key = terminalBufferKey(activeGraph.id, nodeId);
+            setTerminalContents((current) => ({ ...current, [key]: content }));
+            publishAppTerminalContent(key, content);
           } catch {
             // Terminal not available
           }
@@ -1124,7 +1738,7 @@ export function FlowEditor({
 
   const selectedFlowCode =
     selectedFlowNode?.type === "app"
-      ? selectedFlowNode.data.initCode ||
+      ? selectedFlowNode.data.initCode ??
         `from tensorpc.dock import mui, mark_create_layout\n\n\nclass App:\n    @mark_create_layout\n    def my_layout(self):\n        return mui.VBox([\n            mui.Typography(\"Hello DevDock\")\n        ]).prop(width=\"100%\", height=\"100%\")\n`
       : selectedFlowNode
         ? JSON.stringify(selectedFlowNode.data, null, 2)
@@ -1139,11 +1753,9 @@ export function FlowEditor({
       return templateCode !== "" && templateCode === selectedFlowNode?.data.initCode;
     })?.label ?? "";
   const selectedAppIsRunning =
-    selectedFlowNode?.type === "app" &&
-    (nodeStatuses[selectedFlowNode.id] === "running" ||
-      (appLayoutNodeId === selectedFlowNode.id && Boolean(appLayout)));
+    selectedFlowNode?.type === "app" && nodeStatuses[selectedFlowNode.id] === "running";
   const selectedAppHasRuntime = Boolean(
-    selectedFlowNode?.type === "app" && appLayout && appLayoutNodeId === selectedFlowNode.id,
+    selectedAppIsRunning && appLayout && appLayoutNodeId === selectedFlowNode?.id,
   );
   const selectedAppDriver = selectedFlowNode?.type === "app" ? selectedFlowNode.data.driver ?? "" : "";
   const selectedDriverNode =
@@ -1294,6 +1906,58 @@ export function FlowEditor({
 
   const displayConnectionUrl =
     connectionUrl?.replace("/api/ws/", "/").replace("127.0.0.1", "localhost") ?? "";
+  const backendPort = connectionPortLabel(connectionUrl);
+  const backendHealth =
+    status === "connected"
+      ? {
+          label: "backend online",
+          tone: "ok" as const,
+          symbol: "●",
+          title: `Backend port is open: ${backendPort}`,
+        }
+      : status === "connecting"
+        ? {
+            label: "checking backend",
+            tone: "checking" as const,
+            symbol: "◐",
+            title: `Checking backend port: ${backendPort}`,
+          }
+        : status === "reconnecting"
+          ? {
+              label: `reconnecting ${reconnectAttempt}/10`,
+              tone: "checking" as const,
+              symbol: "◐",
+              title: `Backend connection dropped; probing ${backendPort}`,
+            }
+          : status === "error"
+            ? {
+                label: "backend offline",
+                tone: "bad" as const,
+                symbol: "●",
+                title: `Backend port is not reachable: ${backendPort}${error ? ` (${error})` : ""}`,
+              }
+            : {
+                label: "backend idle",
+                tone: "idle" as const,
+                symbol: "○",
+                title: `Backend check is idle: ${backendPort}`,
+              };
+  const backendHealthColor =
+    backendHealth.tone === "ok"
+      ? "var(--td-green)"
+      : backendHealth.tone === "bad"
+        ? "var(--td-red)"
+        : backendHealth.tone === "checking"
+          ? "#e0a72f"
+          : "var(--td-text-muted)";
+  const backendHealthBg =
+    backendHealth.tone === "ok"
+      ? "color-mix(in srgb, var(--td-green) 10%, var(--td-surface))"
+      : backendHealth.tone === "bad"
+        ? "color-mix(in srgb, var(--td-red) 12%, var(--td-surface))"
+        : backendHealth.tone === "checking"
+          ? "color-mix(in srgb, #e0a72f 12%, var(--td-surface))"
+          : "color-mix(in srgb, var(--td-surface) 68%, transparent)";
 
   return (
     <div
@@ -1546,30 +2210,70 @@ export function FlowEditor({
 
             <div style={{ padding: "10px 16px 16px", borderTop: "1px solid var(--td-border-soft)", display: "grid", gap: 8 }}>
               {displayConnectionUrl && (
-                <button
-                  type="button"
-                  title={connectionUrl}
-                  onClick={() => setConnectionDialogOpen(true)}
-                  style={{
-                    minWidth: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    border: "1px solid var(--td-border)",
-                    borderRadius: 12,
-                    padding: "7px 10px",
-                    color: "var(--td-text-muted)",
-                    background: "color-mix(in srgb, var(--td-surface) 68%, transparent)",
-                    fontSize: 12,
-                    fontWeight: 650,
-                    cursor: "pointer",
-                  }}
-                >
-                  <span style={{ color: "var(--td-green)" }}>↔</span>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {displayConnectionUrl}
-                  </span>
-                </button>
+                <div style={{ display: "flex", alignItems: "stretch", gap: 6, minWidth: 0 }}>
+                  <button
+                    type="button"
+                    title={`${backendHealth.title}\n${connectionUrl ?? ""}`}
+                    onClick={() => setConnectionDialogOpen(true)}
+                    style={{
+                      minWidth: 0,
+                      flex: 1,
+                      display: "grid",
+                      gridTemplateColumns: "auto minmax(0, 1fr)",
+                      alignItems: "center",
+                      columnGap: 6,
+                      rowGap: 2,
+                      border: `1px solid ${backendHealthColor}`,
+                      borderRadius: 12,
+                      padding: "6px 10px",
+                      color: "var(--td-text-muted)",
+                      background: backendHealthBg,
+                      fontSize: 12,
+                      fontWeight: 650,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <span style={{ color: backendHealthColor, gridRow: "1 / span 2" }}>
+                      {backendHealth.symbol}
+                    </span>
+                    <span
+                      style={{
+                        minWidth: 0,
+                        color: backendHealthColor,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {backendHealth.label}
+                    </span>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {displayConnectionUrl}
+                    </span>
+                  </button>
+                  {(status === "error" || status === "idle") && (
+                    <button
+                      type="button"
+                      title={`Retry backend connection on ${backendPort}`}
+                      onClick={() => {
+                        setStatusMsg(`Checking backend port ${backendPort}...`);
+                        void connect();
+                      }}
+                      style={{
+                        width: 34,
+                        flexShrink: 0,
+                        border: "1px solid var(--td-border)",
+                        borderRadius: 12,
+                        background: "var(--td-surface)",
+                        color: "var(--td-text)",
+                        cursor: "pointer",
+                        fontWeight: 800,
+                      }}
+                    >
+                      ↻
+                    </button>
+                  )}
+                </div>
               )}
               <button type="button" onClick={onThemeToggle} style={sidebarNavStyle}>
                 <span style={{ width: 20, textAlign: "center" }}>{isDarkTheme ? "☀" : "☾"}</span>
@@ -2002,6 +2706,7 @@ export function FlowEditor({
                 </div>
                 <div style={{ flex: 1, minHeight: 0, borderTop: "1px solid var(--td-border)" }}>
                   <Editor
+                    key={selectedFlowNode?.id ?? "no-node"}
                     value={selectedFlowCode}
                     language={selectedFlowNode?.type === "app" ? "python" : "json"}
                     theme={isDarkTheme ? "vs-dark" : "vs"}
@@ -2166,14 +2871,20 @@ export function FlowEditor({
       )}
       {/* Status bar */}
       {statusMsg && (
-        <div style={{
-          padding: "4px 12px",
-          backgroundColor: "#1a3a1a",
-          borderTop: "1px solid #2a5a2a",
-          color: "#4caf50",
-          fontSize: 11,
-          flexShrink: 0,
-        }}>
+        <div
+          title={statusMsg}
+          style={{
+            padding: "4px 12px",
+            backgroundColor: "#1a3a1a",
+            borderTop: "1px solid #2a5a2a",
+            color: "#4caf50",
+            fontSize: 11,
+            flexShrink: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
           {statusMsg}
         </div>
       )}

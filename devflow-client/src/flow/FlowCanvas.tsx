@@ -176,6 +176,9 @@ export function FlowCanvas({ graph, onNodeSelect }: FlowCanvasProps) {
         nodeTypes={nodeTypes}
         defaultViewport={initialViewport}
         fitView={false}
+        panOnScroll={false}
+        zoomOnScroll
+        zoomOnDoubleClick
         deleteKeyCode={["Backspace", "Delete"]}
         defaultEdgeOptions={{ type: "bezier" }}
         style={{ background: "#1a1a2e" }}

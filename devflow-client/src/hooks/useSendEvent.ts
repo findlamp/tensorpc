@@ -7,12 +7,12 @@ export function useSendEvent() {
   const { graphId, nodeId } = useContext(LayoutContext);
 
   return useCallback(
-    (compUid: string, eventType: number, data: unknown) => {
+    (compUid: string, eventType: number, data: unknown, indexesRaw?: string) => {
       if (graphId && nodeId) {
-        sendUiEvent(graphId, nodeId, compUid, eventType, data);
-      } else {
-        console.warn("useSendEvent: no graph/node context");
+        return sendUiEvent(graphId, nodeId, compUid, eventType, data, indexesRaw);
       }
+      console.warn("useSendEvent: no graph/node context");
+      return Promise.resolve(false);
     },
     [sendUiEvent, graphId, nodeId],
   );
@@ -22,7 +22,7 @@ export function useSendEvent() {
 export function useSendClick(compUid: string) {
   const sendEvent = useSendEvent();
   return useCallback(() => {
-    sendEvent(compUid, 0 /* Click */, {});
+    sendEvent(compUid, 0 /* Click */, null);
   }, [sendEvent, compUid]);
 }
 

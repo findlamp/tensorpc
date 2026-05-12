@@ -20,11 +20,7 @@ export function BarChart({
   const height = typeof props.height === "number" ? props.height : 300;
 
   if (!series?.length) {
-    return (
-      <div style={{ ...baseSx, padding: 16, color: "#666", fontSize: 13, border: "1px dashed #444", borderRadius: 8 }}>
-        BarChart (no data)
-      </div>
-    );
+    return null;
   }
 
   return (

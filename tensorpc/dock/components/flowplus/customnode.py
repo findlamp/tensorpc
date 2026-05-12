@@ -11,7 +11,7 @@ import uuid
 
 from tensorpc.constants import TENSORPC_FILE_NAME_PREFIX
 
-from .compute import FLOWUI_CNODE_NODEDATA_KEY, ComputeFlow, NodeSideLayoutOptions, ComputeNode, ComputeNodeWrapper, NodeConfig, ReservedNodeTypes, WrapperConfig, enter_flow_ui_context_object, get_compute_flow_context, register_compute_node, get_cflow_shared_node_key
+from .compute import FLOWUI_CNODE_NODEDATA_KEY, ComputeFlow, NODE_REGISTRY, NodeSideLayoutOptions, ComputeNode, ComputeNodeWrapper, NodeConfig, ReservedNodeTypes, WrapperConfig, enter_flow_ui_context_object, get_compute_flow_context, register_compute_node, get_cflow_shared_node_key
 
 from tensorpc.dock.components import flowui, mui
 from tensorpc.dock.appctx import read_data_storage, save_data_storage, find_all_components
@@ -110,7 +110,7 @@ class CustomNode(ComputeNode):
         finally:
             self._disable_template_fetch = False
 
-    def _get_cnode_cls_from_code(self, code: str):
+    def _get_cnode_cls_from_code(self, code: str, node_name: Optional[str] = None):
         key = f"{TENSORPC_FILE_NAME_PREFIX}-cflow-node-{self.id}"
         mod_name = f"<{key}-{uuid.uuid4().hex}>"
         module = types.ModuleType(mod_name)
@@ -125,7 +125,13 @@ class CustomNode(ComputeNode):
                 cnode_cls = v
                 break
         assert cnode_cls is not None, f"can't find any class that inherit ComputeNode in your code!"
-        cnode = cnode_cls(self.id, self.name, self._node_type, self._init_cfg, self._init_pos)
+        cnode = cnode_cls(
+            self.id,
+            node_name if node_name is not None else self.name,
+            self._node_type,
+            self._init_cfg,
+            self._init_pos,
+        )
         return cnode
 
     async def handle_code_editor_save(self,
@@ -135,7 +141,20 @@ class CustomNode(ComputeNode):
         value = save_ev.value
         ctx = get_compute_flow_context()
         assert ctx is not None, "can't find compute flow context!"
+        prev_class_name = type(self._cnode).__name__
         new_cnode = self._get_cnode_cls_from_code(value)
+        new_class_name = type(new_cnode).__name__
+        should_sync_name_from_class = self.name in {
+            prev_class_name,
+            NODE_REGISTRY[ReservedNodeTypes.Custom].name,
+            NODE_REGISTRY[ReservedNodeTypes.AsyncGenCustom].name,
+        }
+        if should_sync_name_from_class and self.name != new_class_name:
+            self.name = new_class_name
+            new_cnode = self._get_cnode_cls_from_code(
+                value,
+                node_name=new_class_name,
+            )
         self._cnode = new_cnode
         if self._shared_key is not None and check_template_key:
             # update all nodes that use this template

@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { useFlexStyles } from "../../hooks/useFlexStyles";
 
 interface TreeNode {
   id?: unknown;
@@ -103,6 +104,8 @@ function TreeNodeRow({
         style={{
           display: "flex",
           alignItems: "center",
+          minWidth: 0,
+          overflow: "hidden",
           padding: "2px 4px",
           paddingLeft: 4 + indent,
           cursor: showExpand ? "pointer" : "default",
@@ -126,7 +129,17 @@ function TreeNodeRow({
         </span>
 
         {/* Name */}
-        <span style={{ color: color || "var(--td-text)", fontWeight: 500 }}>
+        <span
+          style={{
+            color: color || "var(--td-text)",
+            fontWeight: 500,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={name || "(root)"}
+        >
           {name || "(root)"}
         </span>
 
@@ -135,12 +148,18 @@ function TreeNodeRow({
           <span
             style={{
               marginLeft: 6,
+              minWidth: 0,
               padding: "0 4px",
               borderRadius: 3,
               background: "transparent",
               color: "var(--td-green)",
               fontSize: 10,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flexShrink: 1,
             }}
+            title={typeStr}
           >
             {typeStr}
           </span>
@@ -155,7 +174,18 @@ function TreeNodeRow({
 
         {/* Inline value for simple types */}
         {!showExpand && value && (
-          <span style={{ marginLeft: 8, color: "var(--td-blue)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span
+            style={{
+              marginLeft: 8,
+              minWidth: 0,
+              color: "var(--td-blue)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flexShrink: 1,
+            }}
+            title={value}
+          >
             {value.length > 80 ? value.slice(0, 80) + "..." : value}
           </span>
         )}
@@ -193,6 +223,7 @@ export function TanstackJsonLikeTree({
   layout: Record<string, unknown>;
   children: ReactNode[];
 }) {
+  const sx = useFlexStyles(props);
   const ignoreRoot = Boolean(props.ignoreRoot);
 
   const treeData = extractTree(props);
@@ -201,10 +232,15 @@ export function TanstackJsonLikeTree({
     return (
       <div
         style={{
-          width: "100%",
-          height: "100%",
-          overflow: "auto",
-          padding: 8,
+          ...sx,
+          width: sx.width ?? "100%",
+          height: sx.height ?? "100%",
+          minWidth: sx.minWidth ?? 0,
+          minHeight: sx.minHeight ?? 0,
+          flex: sx.flex,
+          display: "block",
+          overflow: sx.overflow ?? "auto",
+          padding: sx.padding ?? 8,
           color: "var(--td-text-muted)",
           fontSize: 12,
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
@@ -218,9 +254,14 @@ export function TanstackJsonLikeTree({
   return (
     <div
       style={{
-        width: "100%",
-        height: "100%",
-        overflow: "auto",
+        ...sx,
+        width: sx.width ?? "100%",
+        height: sx.height ?? "100%",
+        minWidth: sx.minWidth ?? 0,
+        minHeight: sx.minHeight ?? 0,
+        flex: sx.flex,
+        display: "block",
+        overflow: sx.overflow ?? "auto",
         background: "var(--td-surface)",
         color: "var(--td-text)",
       }}

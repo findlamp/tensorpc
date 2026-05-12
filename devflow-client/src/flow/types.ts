@@ -84,6 +84,13 @@ export interface AppTemplate {
   group?: string;
 }
 
+export interface AppNodeUrls {
+  grpc_url?: string;
+  http_url?: string;
+  is_remote?: boolean;
+  module_name?: string;
+}
+
 export interface DockLayoutModel {
   dockLayoutModel?: unknown;
   favoriteNodes?: string[];

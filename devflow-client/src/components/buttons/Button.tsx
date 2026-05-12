@@ -1,10 +1,12 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import MuiButton from "@mui/material/Button";
 import { useFlexStyles } from "../../hooks/useFlexStyles";
 import { useSendEvent } from "../../hooks/useSendEvent";
+import { renderIcon } from "../display/Icon";
 
 export function Button({
   props,
+  children,
 }: {
   props: Record<string, unknown>;
   layout: Record<string, unknown>;
@@ -14,8 +16,13 @@ export function Button({
   const sendEvent = useSendEvent();
   const compUid = props.compUid as string | undefined;
 
-  const handleClick = () => {
-    if (compUid) sendEvent(compUid, 0 /* Click */, {});
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (!compUid) {
+      console.warn("tensorpc Button clicked without compUid", props);
+      return;
+    }
+    sendEvent(compUid, 0 /* Click */, null);
   };
 
   return (
@@ -27,8 +34,10 @@ export function Button({
       fullWidth={props.fullWidth === true}
       sx={sx}
       onClick={handleClick}
+      startIcon={renderIcon(props.icon)}
+      data-tensorpc-comp-uid={compUid}
     >
-      {props.loading ? "Loading…" : String(props.name ?? "")}
+      {props.loading ? "Loading..." : children.length > 0 ? children : String(props.name ?? "")}
     </MuiButton>
   );
 }

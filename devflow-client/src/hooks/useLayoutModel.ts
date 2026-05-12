@@ -4,6 +4,7 @@ export type ComponentProps = {
   props: Record<string, unknown>;
   usedEvents?: unknown[];
   dmProps?: unknown;
+  dmPropsGrouped?: unknown;
 };
 
 export type LayoutModel = {

@@ -1,25 +1,18 @@
-import { useCallback, useContext, useMemo, useState, type CSSProperties } from "react";
+import { useContext, useMemo, useState, type CSSProperties } from "react";
 import { TensorPcContext } from "./context/TensorPcContext";
 import { FlowEditor } from "./flow/FlowEditor";
+import type { ThemeMode } from "./App";
 
-type ThemeMode = "dark" | "light";
-
-export function FlowApp() {
+export function FlowApp({
+  themeMode,
+  onThemeToggle,
+}: {
+  themeMode: ThemeMode;
+  onThemeToggle: () => void;
+}) {
   const { url } = useContext(TensorPcContext);
   const [sidebarVisible, setSidebarVisible] = useState(true);
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
-    const saved = localStorage.getItem("tensorpc-devdock-theme");
-    return saved === "light" ? "light" : "dark";
-  });
   const isDark = themeMode === "dark";
-
-  const handleThemeToggle = useCallback(() => {
-    setThemeMode((current) => {
-      const next = current === "dark" ? "light" : "dark";
-      localStorage.setItem("tensorpc-devdock-theme", next);
-      return next;
-    });
-  }, []);
 
   const themeVars = useMemo<CSSProperties>(
     () =>
@@ -39,6 +32,7 @@ export function FlowApp() {
         "--td-sidebar-hover": isDark ? "#1a2431" : "#dceef4",
         "--td-blue": isDark ? "#66a3ff" : "#4d73ff",
         "--td-green": isDark ? "#73c46b" : "#3f823c",
+        "--td-red": isDark ? "#ff6b6b" : "#d32f2f",
         "--td-terminal-bg": isDark ? "#080b10" : "#f3f4f6",
         "--td-terminal-header": isDark ? "#121822" : "#e6e8eb",
         "--td-flow-bg": isDark ? "#070d14" : "#f6f8fb",
@@ -71,7 +65,7 @@ export function FlowApp() {
           sidebarVisible={sidebarVisible}
           themeMode={themeMode}
           connectionUrl={url}
-          onThemeToggle={handleThemeToggle}
+          onThemeToggle={onThemeToggle}
           onToggleSidebar={() => setSidebarVisible((visible) => !visible)}
         />
       </div>

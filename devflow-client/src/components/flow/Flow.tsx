@@ -77,6 +77,10 @@ function numberOr(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function isDefinedValue(value: unknown) {
   return value !== undefined && value !== null && value !== "";
 }
@@ -186,19 +190,27 @@ function toRfNode(
   defaultContextMenuItems: MenuItem[] = [],
   screenToFlowPosition = false,
   viewport?: Viewport,
+  basePatch?: Record<string, unknown>,
+  dataPatch?: Record<string, unknown>,
 ): Node {
-  const id = String(node.id ?? `node-${index}`);
-  const data = isRecord(node.data) ? node.data : {};
-  const label = nodeLabel(node);
+  const sourceNode = basePatch ? { ...node, ...basePatch } : node;
+  const id = String(sourceNode.id ?? `node-${index}`);
+  const data = {
+    ...(isRecord(sourceNode.data) ? sourceNode.data : {}),
+    ...(dataPatch ?? {}),
+  };
+  const label = nodeLabel({ ...sourceNode, data });
   const isJsonInput = label.toLowerCase().includes("json input");
-  const width = numberOr(node.width, 180);
+  const width = numberOr(sourceNode.width, 180);
+  const hasExplicitHeight =
+    typeof sourceNode.height === "number" && Number.isFinite(sourceNode.height);
   const height = Math.max(
-    numberOr(node.height, renderedComponent ? 72 : 74),
+    numberOr(sourceNode.height, renderedComponent ? 72 : 74),
     isJsonInput ? 132 : renderedComponent ? 72 : 74,
   );
   const sourcePosition = {
-    x: numberOr(node.position?.x, 80 + index * 180),
-    y: numberOr(node.position?.y, 80 + (index % 3) * 120),
+    x: numberOr(sourceNode.position?.x, 80 + index * 180),
+    y: numberOr(sourceNode.position?.y, 80 + (index % 3) * 120),
   };
   const position =
     screenToFlowPosition && viewport
@@ -221,14 +233,16 @@ function toRfNode(
         : defaultContextMenuItems,
     },
     dragHandle:
-      typeof node.dragHandle === "string" ? node.dragHandle : undefined,
-    selected: Boolean(node.selected),
-    deletable: node.deletable !== false,
+      typeof sourceNode.dragHandle === "string" ? sourceNode.dragHandle : undefined,
+    selected: Boolean(sourceNode.selected),
+    deletable: sourceNode.deletable !== false,
     width,
     height,
     style: {
       width,
-      minHeight: height,
+      ...(renderedComponent && hasExplicitHeight
+        ? { height }
+        : { minHeight: height }),
     },
   };
 }
@@ -244,8 +258,6 @@ function FlowComponentNode({ data, selected }: NodeProps<Record<string, unknown>
         style={{
           width: "100%",
           minHeight: "inherit",
-          outline: selected ? "1px solid #b9a7ff" : undefined,
-          outlineOffset: 0,
           cursor: "pointer",
           overflow: "visible",
         }}
@@ -439,13 +451,28 @@ function FlowInner({
   const positionOverridesRef = useRef<Map<string, { x: number; y: number }>>(
     new Map(),
   );
+  const baseModelPatchesRef = useRef<Map<string, Record<string, unknown>>>(
+    new Map(),
+  );
+  const dataPatchesRef = useRef<Map<string, Record<string, unknown>>>(
+    new Map(),
+  );
   const deletedNodeIdsRef = useRef<Set<string>>(new Set());
   const sourceNodes = useMemo(
     () =>
       nodes
         .filter((node) => !deletedNodeIdsRef.current.has(String(node.id ?? "")))
         .map((node, index) => {
-          const componentUid = isRecord(node.data) && typeof node.data.component === "string"
+          const nodeId = String(node.id ?? `node-${index}`);
+          const basePatch = baseModelPatchesRef.current.get(nodeId);
+          const dataPatch = dataPatchesRef.current.get(nodeId);
+          const patchedData = {
+            ...(isRecord(node.data) ? node.data : {}),
+            ...(dataPatch ?? {}),
+          };
+          const componentUid = typeof patchedData.component === "string"
+            ? patchedData.component
+            : isRecord(node.data) && typeof node.data.component === "string"
             ? node.data.component
             : "";
           const rfNode = toRfNode(
@@ -453,6 +480,10 @@ function FlowInner({
             index,
             childMap.get(componentUid),
             defaultNodeContextMenuItems,
+            false,
+            undefined,
+            basePatch,
+            dataPatch,
           );
           const position = positionOverridesRef.current.get(rfNode.id);
           return position ? { ...rfNode, position } : rfNode;
@@ -498,6 +529,56 @@ function FlowInner({
       y: (point.y - viewport.y) / viewport.zoom,
     };
   }, []);
+
+  const handleWheelZoom = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      if (props.zoomOnScroll === false) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (!target?.closest(".tensorpc-flow-surface")) return;
+      if (
+        target.closest(
+          [
+            ".react-flow__controls",
+            ".react-flow__minimap",
+            ".monaco-editor",
+            "[data-tensorpc-terminal]",
+            "[data-tensorpc-app-terminal]",
+            "input",
+            "textarea",
+            "select",
+            "[contenteditable='true']",
+          ].join(","),
+        )
+      ) {
+        return;
+      }
+      const instance = flowInstanceRef.current;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!instance || !rect) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const viewport = instance.getViewport();
+      const minZoom = numberOr(props.minZoom, 0.2);
+      const maxZoom = numberOr(props.maxZoom, 4);
+      const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+      const nextZoom = clamp(viewport.zoom * zoomFactor, minZoom, maxZoom);
+      if (Math.abs(nextZoom - viewport.zoom) < 0.0001) return;
+
+      const paneX = event.clientX - rect.left;
+      const paneY = event.clientY - rect.top;
+      const flowX = (paneX - viewport.x) / viewport.zoom;
+      const flowY = (paneY - viewport.y) / viewport.zoom;
+      const nextViewport = {
+        x: paneX - flowX * nextZoom,
+        y: paneY - flowY * nextZoom,
+        zoom: nextZoom,
+      };
+      void instance.setViewport(nextViewport, { duration: 0 });
+      if (compUid) flowViewportMemory.set(compUid, nextViewport);
+    },
+    [compUid, props.maxZoom, props.minZoom, props.zoomOnScroll],
+  );
 
   const refreshNodeInternals = useCallback(
     (nodeIds: string[]) => {
@@ -550,6 +631,10 @@ function FlowInner({
               y: rfNode.position.y,
             });
           }
+          if (data.isOverride) {
+            baseModelPatchesRef.current.delete(rfNode.id);
+            dataPatchesRef.current.delete(rfNode.id);
+          }
           deletedNodeIdsRef.current.delete(rfNode.id);
           return rfNode;
         });
@@ -565,6 +650,8 @@ function FlowInner({
         ids.forEach((id) => {
           deletedNodeIdsRef.current.add(id);
           positionOverridesRef.current.delete(id);
+          baseModelPatchesRef.current.delete(id);
+          dataPatchesRef.current.delete(id);
         });
         setRfNodes((current) => current.filter((node) => !ids.has(node.id)));
         setRfEdges((current) =>
@@ -595,14 +682,27 @@ function FlowInner({
         const nextNodes = switchNodes
           .filter((node) => !deletedNodeIdsRef.current.has(String(node.id ?? "")))
           .map((node, index) => {
+              const nodeId = String(node.id ?? `node-${index}`);
+              const basePatch = baseModelPatchesRef.current.get(nodeId);
+              const dataPatch = dataPatchesRef.current.get(nodeId);
+              const patchedData = {
+                ...(isRecord(node.data) ? node.data : {}),
+                ...(dataPatch ?? {}),
+              };
               const componentUid = isRecord(node.data) && typeof node.data.component === "string"
                 ? node.data.component
+                : typeof patchedData.component === "string"
+                ? patchedData.component
                 : "";
               return toRfNode(
                 node,
                 index,
                 childMap.get(componentUid),
                 defaultNodeContextMenuItems,
+                false,
+                undefined,
+                basePatch,
+                dataPatch,
               );
             })
         const nextEdges = Array.isArray(data.edges)
@@ -645,6 +745,14 @@ function FlowInner({
       ) {
         const ids = Array.isArray(data.nodeId) ? data.nodeId.map(String) : [String(data.nodeId)];
         const patch = data.data;
+        const patchMap =
+          type === FlowControlType.UpdateNodeData ? dataPatchesRef.current : baseModelPatchesRef.current;
+        ids.forEach((id) => {
+          patchMap.set(id, {
+            ...(patchMap.get(id) ?? {}),
+            ...patch,
+          });
+        });
         setRfNodes((current) =>
           current.map((node) =>
             ids.includes(node.id)
@@ -678,7 +786,26 @@ function FlowInner({
   }, [childMap, defaultNodeContextMenuItems, props.compUid, refreshNodeInternals]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
-    setRfNodes((current) => applyNodeChanges(changes, current));
+    setRfNodes((current) => {
+      const next = applyNodeChanges(changes, current);
+      const selectedNodes = next.filter((node) => node.selected);
+      if (selectedNodes.length <= 1) return next;
+      const latestSelectedChange = [...changes]
+        .reverse()
+        .find(
+          (change) =>
+            change.type === "select" &&
+            "selected" in change &&
+            change.selected === true,
+        );
+      const keepSelectedId =
+        latestSelectedChange && "id" in latestSelectedChange
+          ? String(latestSelectedChange.id)
+          : selectedNodes[selectedNodes.length - 1]?.id;
+      return next.map((node) =>
+        node.id === keepSelectedId ? node : { ...node, selected: false },
+      );
+    });
   }, []);
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
@@ -858,10 +985,6 @@ function FlowInner({
           event.stopPropagation();
           return;
         }
-        if (selectedId) {
-          const node = rfNodes.find((item) => item.id === selectedId);
-          selectNode(selectedId, nodeAllowsEditor(node));
-        }
       }}
       onMouseDownCapture={(event) => {
         const selectedId = flowNodeIdFromTarget(event.target);
@@ -869,11 +992,8 @@ function FlowInner({
           event.stopPropagation();
           return;
         }
-        if (selectedId) {
-          const node = rfNodes.find((item) => item.id === selectedId);
-          selectNode(selectedId, nodeAllowsEditor(node));
-        }
       }}
+      onWheelCapture={handleWheelZoom}
       style={{
         ...sx,
         width: sx.width ?? "100%",
@@ -891,6 +1011,14 @@ function FlowInner({
             border-radius: 12px;
             overflow: visible;
             filter: drop-shadow(0 8px 18px var(--td-shadow));
+            outline: none !important;
+            box-shadow: none !important;
+          }
+          .tensorpc-flow-surface .react-flow__node:focus,
+          .tensorpc-flow-surface .react-flow__node:focus-visible,
+          .tensorpc-flow-surface .react-flow__node.selected {
+            outline: none !important;
+            box-shadow: none !important;
           }
           .tensorpc-flow-surface .react-flow__node > div {
             border-radius: 12px;
@@ -939,6 +1067,10 @@ function FlowInner({
           .tensorpc-flow-surface .ComputeFlowNodeWrapper {
             background: var(--td-node-bg) !important;
             box-shadow: 0 8px 22px var(--td-shadow) !important;
+          }
+          .tensorpc-flow-surface .react-flow__node.selected .ComputeFlowNodeWrapper {
+            outline: 1px solid var(--td-blue);
+            outline-offset: 0;
           }
           .tensorpc-flow-surface .ComputeFlowHeader {
             background: var(--td-node-header) !important;
@@ -1030,6 +1162,17 @@ function FlowInner({
         onMoveEnd={(_event, viewport) => {
           if (compUid) flowViewportMemory.set(compUid, viewport);
         }}
+        onNodeDragStart={(_event, node) => {
+          setRfNodes((current) =>
+            current.map((item) =>
+              item.id === node.id
+                ? { ...item, selected: true }
+                : item.selected
+                ? { ...item, selected: false }
+                : item,
+            ),
+          );
+        }}
         onNodeDragStop={(_event, _node, draggedNodes) => {
           const changed = new Map(
             draggedNodes.map((draggedNode) => [
@@ -1068,7 +1211,7 @@ function FlowInner({
           if (selectedId === null) {
             return;
           }
-          selectNode(selectedId, nodeAllowsEditor(selectedNodes[0]));
+          selectNode(selectedId, false);
         }}
         onNodesDelete={(deletedNodes) => {
           if (deletedNodes.length === 0) return;
@@ -1095,9 +1238,13 @@ function FlowInner({
         nodesDraggable={props.nodesDraggable !== false}
         nodesConnectable={props.nodesConnectable !== false}
         elementsSelectable={props.elementsSelectable !== false}
+        multiSelectionKeyCode={null}
+        selectionKeyCode={null}
+        selectionOnDrag={false}
+        selectNodesOnDrag={false}
         panOnDrag={props.panOnDrag !== false}
         panActivationKeyCode={null}
-        panOnScroll={Boolean(props.panOnScroll)}
+        panOnScroll={props.zoomOnScroll === false && props.panOnScroll === true}
         zoomOnScroll={props.zoomOnScroll !== false}
         zoomOnDoubleClick
         defaultEdgeOptions={{ type: "bezier", style: { stroke: "var(--td-text-muted)", strokeWidth: 1.7 } }}

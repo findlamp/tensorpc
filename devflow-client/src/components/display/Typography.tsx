@@ -11,6 +11,11 @@ export function Typography({
 }) {
   const sx = useFlexStyles(props);
   const display = props.display as CSSProperties["display"] | undefined;
+  const shouldClipInlineText =
+    props.noWrap === true ||
+    props.variant === "caption" ||
+    sx.flex !== undefined ||
+    sx.flexGrow !== undefined;
   return (
     <MuiTypography
       variant={
@@ -21,9 +26,21 @@ export function Typography({
       color={props.muiColor as string | undefined}
       align={props.align as "center" | "inherit" | "justify" | "left" | "right" | undefined}
       gutterBottom={props.gutterBottom === true}
-      noWrap={props.noWrap === true}
+      noWrap={shouldClipInlineText}
       className={typeof props.className === "string" ? props.className : undefined}
-      sx={{ ...sx, display }}
+      sx={{
+        ...sx,
+        display,
+        minWidth: sx.minWidth ?? 0,
+        maxWidth: sx.maxWidth ?? "100%",
+        ...(shouldClipInlineText
+          ? {
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }
+          : null),
+      }}
     >
       {String(props.value ?? "")}
     </MuiTypography>

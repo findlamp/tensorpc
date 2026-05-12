@@ -1,93 +1,38 @@
-import { encodeRpcRequest, decodeRpcReply } from "../../core/rpcClient";
-import { putArraysToData } from "../../core/jsonCodec";
 import type {
+  AppNodeUrls,
   FlowGraphData,
   LoadGraphResponse,
   NodeStatus,
 } from "../types";
+import { AppEventType } from "../../core/socketTypes";
 
 const FLOW_PREFIX = "tensorpc.dock.serv.core::Flow";
-const JSON_ARRAY_FLAG = 0x10;
-const ENCODE_METHOD_MASK = 0xff;
-
-function formatRpcException(exception: unknown): string {
-  const raw = typeof exception === "string" ? exception : String(exception);
-  try {
-    const parsed = JSON.parse(raw) as { error?: unknown; detail?: unknown };
-    const error = typeof parsed.error === "string" ? parsed.error : "RPC error";
-    const detail = typeof parsed.detail === "string" ? parsed.detail : "";
-    const permissionMatch = detail.match(/Permission denied for user ([^\\s]+) on host ([^\\s]+)/);
-    if (permissionMatch) {
-      return `${error}: Permission denied for user ${permissionMatch[1]} on host ${permissionMatch[2]}`;
-    }
-    const lastLine = detail
-      .split("\\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .pop();
-    return lastLine ? `${error}: ${lastLine}` : error;
-  } catch {
-    return raw.length > 500 ? `${raw.slice(0, 500)}...` : raw;
-  }
-}
-
-async function callRpc(
+type SocketRpcCaller = (
   serviceKey: string,
   args: unknown[],
-): Promise<unknown> {
-  const rpcReq = {
-    service_key: serviceKey,
-    data: JSON.stringify([args, {}]),
-    flags: 0,
-  };
-  console.log(`RPC → ${serviceKey}`, { args });
-  const body = encodeRpcRequest(rpcReq);
-  const resp = await fetch(`/api/rpc`, {
-    method: "POST",
-    body,
-    headers: { "Content-Type": "application/octet-stream" },
-  });
-  console.log(`RPC ← ${serviceKey} HTTP ${resp.status}`);
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    console.error(`RPC ${serviceKey} failed: HTTP ${resp.status}`, text);
-    throw new Error(`RPC ${serviceKey} failed: HTTP ${resp.status}`);
-  }
-  const respBuf = new Uint8Array(await resp.arrayBuffer());
-  const reply = decodeRpcReply(respBuf);
-  if (reply.exception) {
-    console.error(`RPC ${serviceKey} error:`, reply.exception);
-    throw new Error(`RPC ${serviceKey} error: ${formatRpcException(reply.exception)}`);
-  }
-  if (reply.data != null) {
-    const skeleton = JSON.parse(reply.data) as unknown;
-    const arrays = (reply.arrays ?? []).map((array) => array.data);
-    const decoded =
-      ((reply.flags ?? 0) & ENCODE_METHOD_MASK) === JSON_ARRAY_FLAG
-        ? putArraysToData(arrays, skeleton)
-        : skeleton;
-    if (
-      Array.isArray(decoded) &&
-      Array.isArray(decoded[0]) &&
-      decoded[0].length > 0
-    ) {
-      return decoded[0][0];
-    }
-    if (Array.isArray(decoded) && decoded.length > 0) {
-      return decoded[0];
-    }
-    return decoded;
-  }
-  return null;
-}
+  timeoutMs?: number,
+) => Promise<unknown>;
 
-export function createFlowRpc(): FlowRpcClient {
-  return new FlowRpcClient();
+export function createFlowRpc(callSocketRpc: SocketRpcCaller): FlowRpcClient {
+  return new FlowRpcClient(callSocketRpc);
 }
 
 export class FlowRpcClient {
+  private callSocketRpc: SocketRpcCaller | null = null;
+
+  constructor(callSocketRpc?: SocketRpcCaller) {
+    this.setCaller(callSocketRpc);
+  }
+
+  setCaller(callSocketRpc?: SocketRpcCaller) {
+    this.callSocketRpc = typeof callSocketRpc === "function" ? callSocketRpc : null;
+  }
+
   private call(serviceKey: string, ...args: unknown[]) {
-    return callRpc(`${FLOW_PREFIX}.${serviceKey}`, args);
+    if (!this.callSocketRpc) {
+      return Promise.reject(new Error("Flow RPC client is not connected to the current WebSocket"));
+    }
+    return this.callSocketRpc(`${FLOW_PREFIX}.${serviceKey}`, args, 60_000);
   }
 
   // ── Graph operations ──
@@ -160,6 +105,10 @@ export class FlowRpcClient {
     return this.call("query_app_state", graphId, nodeId);
   }
 
+  async queryAppNodeUrls(graphId: string, nodeId: string): Promise<AppNodeUrls | null> {
+    return (await this.call("query_app_node_urls", graphId, nodeId)) as AppNodeUrls | null;
+  }
+
   async runUiEvent(
     graphId: string,
     nodeId: string,
@@ -167,6 +116,14 @@ export class FlowRpcClient {
     eventType: number,
     data: unknown,
   ): Promise<void> {
-    await this.call("run_ui_event", graphId, nodeId, { [compUid]: [eventType, data] }, false);
+    await this.call(
+      "run_single_event",
+      graphId,
+      nodeId,
+      AppEventType.UIEvent,
+      { [compUid]: [eventType, data] },
+      true,
+      false,
+    );
   }
 }

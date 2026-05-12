@@ -6,9 +6,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { AppEventType } from "../core/socketTypes";
 import { TensorPcWs, type AppEventMessage } from "../core/tensorPcWs";
-import { encodeRpcRequest, decodeRpcReply } from "../core/rpcClient";
-import { putArraysToData } from "../core/jsonCodec";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error" | "reconnecting";
 
@@ -23,13 +22,21 @@ export interface TensorPcContextValue {
   disconnect: () => void;
   subscribeToAppEvents: (handler: (ev: AppEventMessage) => void) => void;
   subscribeToCommandNodeEvents: (handler: (ev: CommandNodeEventMessage) => void) => void;
+  callSocketRpc: (serviceKey: string, args: unknown[], timeoutMs?: number) => Promise<unknown>;
+  appRuntimeTargetVersion: number;
+  setAppRuntimeTarget: (
+    target: { graphId: string; nodeId: string; rpcUrl: string } | null,
+  ) => void;
   sendUiEvent: (
     graphId: string,
     nodeId: string,
     compUid: string,
     eventType: number,
     data: unknown,
-  ) => Promise<void>;
+    indexesRaw?: string,
+    timeoutMs?: number,
+    isSync?: boolean,
+  ) => Promise<boolean>;
 }
 
 export type CommandNodeEventMessage = {
@@ -48,12 +55,34 @@ export const TensorPcContext = createContext<TensorPcContextValue>({
   disconnect: () => {},
   subscribeToAppEvents: () => {},
   subscribeToCommandNodeEvents: () => {},
-  sendUiEvent: async () => {},
+  callSocketRpc: async () => null,
+  appRuntimeTargetVersion: 0,
+  setAppRuntimeTarget: () => {},
+  sendUiEvent: async () => false,
 });
 
-const JSON_ARRAY_FLAG = 0x10;
-const ENCODE_METHOD_MASK = 0xff;
 const WS_URL_STORAGE_KEY = "tensorpc-devdock-ws-url";
+
+function createClientId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function withFreshClientId(wsUrl: string): string {
+  try {
+    const u = new URL(wsUrl);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const clientId = createClientId();
+    if (parts.length >= 2 && parts.at(-2) === "ws") {
+      parts[parts.length - 1] = clientId;
+    } else {
+      parts.push(clientId);
+    }
+    u.pathname = `/${parts.join("/")}`;
+    return u.toString();
+  } catch {
+    return wsUrl;
+  }
+}
 
 function deriveHttpUrl(wsUrl: string): string {
   try {
@@ -64,41 +93,60 @@ function deriveHttpUrl(wsUrl: string): string {
   }
 }
 
-const RUN_UI_EVENT_KEY = "tensorpc.dock.serv.core::Flow.run_ui_event";
+const RUN_SINGLE_EVENT_KEY = "tensorpc.dock.serv.core::Flow.run_single_event";
+
+declare global {
+  interface Window {
+    __tensorpcDevflowWs?: TensorPcWs;
+  }
+}
 
 export function TensorPcProvider({ children }: { children: ReactNode }) {
   const [url, setUrlState] = useState(() => {
     const savedUrl = localStorage.getItem(WS_URL_STORAGE_KEY);
-    if (savedUrl) return savedUrl;
+    if (savedUrl) return withFreshClientId(savedUrl);
     const envHost = import.meta.env.VITE_DEFAULT_WS_HOST;
     const envPort = import.meta.env.VITE_DEFAULT_WS_PORT;
     const envPath = import.meta.env.VITE_DEFAULT_WS_PATH;
     const host = envHost || "127.0.0.1";
     const port = envPort || "51052";
     const path = envPath || "/api/ws";
-    const uid =
-      Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    return `ws://${host}:${port}${path}/${uid}`;
+    return `ws://${host}:${port}${path}/${createClientId()}`;
   });
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [appRuntimeTargetVersion, setAppRuntimeTargetVersion] = useState(0);
   const clientRef = useRef<TensorPcWs | null>(null);
+  const connectGenerationRef = useRef(0);
+  const connectingRef = useRef<Promise<void> | null>(null);
   const handlerRef = useRef<((ev: AppEventMessage) => void) | null>(null);
   const commandHandlerRef = useRef<((ev: CommandNodeEventMessage) => void) | null>(null);
+  const appRuntimeTargetRef = useRef<{
+    graphId: string;
+    nodeId: string;
+    rpcUrl: string;
+  } | null>(null);
 
   const httpBaseUrl = deriveHttpUrl(url);
 
   const setUrl = useCallback((nextUrl: string) => {
     const trimmedUrl = nextUrl.trim();
     if (!trimmedUrl) return;
-    localStorage.setItem(WS_URL_STORAGE_KEY, trimmedUrl);
-    setUrlState(trimmedUrl);
+    const freshUrl = withFreshClientId(trimmedUrl);
+    localStorage.setItem(WS_URL_STORAGE_KEY, freshUrl);
+    setUrlState(freshUrl);
   }, []);
 
   const disconnect = useCallback(() => {
-    clientRef.current?.close();
+    const current = clientRef.current;
+    connectGenerationRef.current += 1;
+    current?.close();
+    if (window.__tensorpcDevflowWs === current) {
+      window.__tensorpcDevflowWs = undefined;
+    }
     clientRef.current = null;
+    connectingRef.current = null;
     handlerRef.current = null;
     commandHandlerRef.current = null;
     setStatus("idle");
@@ -106,11 +154,22 @@ export function TensorPcProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const connect = useCallback(async () => {
+    const generation = connectGenerationRef.current + 1;
+    connectGenerationRef.current = generation;
     setStatus("connecting");
     setError(null);
     setReconnectAttempt(0);
 
-    const client = new TensorPcWs(url, {
+    const previous = clientRef.current;
+    if (previous) {
+      previous.close();
+      if (window.__tensorpcDevflowWs === previous) {
+        window.__tensorpcDevflowWs = undefined;
+      }
+    }
+
+    const connectUrl = withFreshClientId(url);
+    const client = new TensorPcWs(connectUrl, {
       maxReconnects: 10,
       reconnectBaseDelay: 1000,
       reconnectMaxDelay: 30000,
@@ -124,15 +183,40 @@ export function TensorPcProvider({ children }: { children: ReactNode }) {
         setError("Reconnection failed after max attempts");
       },
     });
+    if (window.__tensorpcDevflowWs && window.__tensorpcDevflowWs !== client) {
+      window.__tensorpcDevflowWs.close();
+    }
+    window.__tensorpcDevflowWs = client;
     clientRef.current = client;
 
+    const pending = client.connect();
+    connectingRef.current = pending;
     try {
-      await client.connect();
+      await pending;
+      if (connectGenerationRef.current !== generation || clientRef.current !== client) {
+        return;
+      }
+      if (handlerRef.current) {
+        client.subscribeToAppEvents(handlerRef.current);
+      }
+      if (commandHandlerRef.current) {
+        client.subscribeToCommandNodeEvents(commandHandlerRef.current);
+      }
       setStatus("connected");
     } catch (e) {
+      if (connectGenerationRef.current !== generation || clientRef.current !== client) {
+        return;
+      }
       setStatus("error");
       setError(e instanceof Error ? e.message : String(e));
+      if (window.__tensorpcDevflowWs === client) {
+        window.__tensorpcDevflowWs = undefined;
+      }
       clientRef.current = null;
+    } finally {
+      if (connectGenerationRef.current === generation && clientRef.current === client) {
+        connectingRef.current = null;
+      }
     }
   }, [url]);
 
@@ -152,6 +236,33 @@ export function TensorPcProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const callSocketRpc = useCallback(
+    async (serviceKey: string, args: unknown[], timeoutMs?: number) => {
+      if (!clientRef.current && connectingRef.current) {
+        await connectingRef.current;
+      }
+      const client = clientRef.current;
+      if (!client) throw new Error("WebSocket is not connected");
+      return client.call(serviceKey, args, timeoutMs);
+    },
+    [],
+  );
+
+  const setAppRuntimeTarget = useCallback(
+    (target: { graphId: string; nodeId: string; rpcUrl: string } | null) => {
+      const currentTarget = appRuntimeTargetRef.current;
+      const currentKey = currentTarget
+        ? `${currentTarget.graphId}@${currentTarget.nodeId}:${currentTarget.rpcUrl}`
+        : "";
+      const nextKey = target ? `${target.graphId}@${target.nodeId}:${target.rpcUrl}` : "";
+      appRuntimeTargetRef.current = target;
+      if (currentKey !== nextKey) {
+        setAppRuntimeTargetVersion((version) => version + 1);
+      }
+    },
+    [],
+  );
+
   const sendUiEvent = useCallback(
     async (
       graphId: string,
@@ -159,48 +270,30 @@ export function TensorPcProvider({ children }: { children: ReactNode }) {
       compUid: string,
       eventType: number,
       data: unknown,
+      indexesRaw?: string,
+      timeoutMs?: number,
+      isSync = false,
     ) => {
       const uiEvDict = {
-        [compUid]: [eventType, data],
+        [compUid]:
+          indexesRaw === undefined ? [eventType, data] : [eventType, data, indexesRaw],
       };
-      const args = [graphId, nodeId, uiEvDict, false];
-      const rpcReq = {
-        service_key: RUN_UI_EVENT_KEY,
-        data: JSON.stringify([args, {}]),
-        flags: 0,
-      };
+      const args = [graphId, nodeId, AppEventType.UIEvent, uiEvDict, true, isSync];
       try {
-        const body = encodeRpcRequest(rpcReq);
-        const resp = await fetch(`/api/rpc`, {
-          method: "POST",
-          body,
-          headers: { "Content-Type": "application/octet-stream" },
-        });
-        if (!resp.ok) {
-          console.warn(`sendUiEvent HTTP ${resp.status}`);
-          return;
-        }
-        const respBuf = new Uint8Array(await resp.arrayBuffer());
-        const reply = decodeRpcReply(respBuf);
-        if (reply.exception) {
-          console.warn(`sendUiEvent RPC error: ${reply.exception}`);
-        } else if (reply.data) {
-          const skeleton = JSON.parse(reply.data) as unknown;
-          const arrays = (reply.arrays ?? []).map((array) => array.data);
-          if (((reply.flags ?? 0) & ENCODE_METHOD_MASK) === JSON_ARRAY_FLAG) {
-            putArraysToData(arrays, skeleton);
-          }
-        }
+        await callSocketRpc(RUN_SINGLE_EVENT_KEY, args, timeoutMs ?? 30_000);
+        return true;
       } catch (e) {
-        console.warn("sendUiEvent failed:", e);
+        console.warn("sendUiEvent RPC error:", e);
+        return false;
       }
     },
-    [httpBaseUrl],
+    [callSocketRpc],
   );
 
   useEffect(() => {
     void connect();
-  }, [connect]);
+    return () => disconnect();
+  }, [connect, disconnect]);
 
   return (
     <TensorPcContext.Provider
@@ -215,7 +308,10 @@ export function TensorPcProvider({ children }: { children: ReactNode }) {
         disconnect,
         subscribeToAppEvents,
         subscribeToCommandNodeEvents,
+        callSocketRpc,
+        appRuntimeTargetVersion,
         sendUiEvent,
+        setAppRuntimeTarget,
       }}
     >
       {children}

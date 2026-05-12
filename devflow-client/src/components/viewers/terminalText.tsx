@@ -9,6 +9,28 @@ export function dataToText(data: unknown) {
     );
   }
   if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const entries = Object.entries(data as Record<string, unknown>);
+    if (entries.length > 0) {
+      const bytes = new Uint8Array(entries.length);
+      for (let i = 0; i < entries.length; i += 1) {
+        const [key, value] = entries[i]!;
+        const index = Number(key);
+        if (
+          !Number.isInteger(index) ||
+          index < 0 ||
+          index >= entries.length ||
+          typeof value !== "number" ||
+          value < 0 ||
+          value > 255
+        ) {
+          return String(data ?? "");
+        }
+        bytes[index] = value;
+      }
+      return new TextDecoder().decode(bytes);
+    }
+  }
   return String(data ?? "");
 }
 
@@ -16,20 +38,147 @@ function stripUnsupportedAnsi(value: string) {
   return value
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[(?![0-9;:]*m)[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[=>]/g, "")
     .replace(/\x1b[()#%*+\-.\/]./g, "")
     .replace(/[^\x09\x0a\x0d\x1b\x20-\x7e\u00a0-\uffff]/g, "")
     .replace(/\ufffd/g, "");
 }
 
+function normalizeLineBreaks(value: string) {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function lineForMatching(value: string) {
+  return stripUnsupportedAnsi(value).replace(/\x1b\[[0-9;:]*m/g, "").replace(/\r/g, "");
+}
+
+function stripTensorpcInternalNoise(value: string) {
+  const lines = value.split("\n");
+  const plainLines = lines.map(lineForMatching);
+  const kept: string[] = [];
+  let skipping = false;
+  let skippingStartupCommand = false;
+  let maybeSkippingServerStartedAddress = false;
+
+  const isTensorpcStartupCommand = (line: string) =>
+    /\bpython\s+-m\s+tensorpc\.serve\b/.test(line) &&
+    line.includes("tensorpc.dock.serv.flowapp::FlowApp");
+
+  const isTensorpcStartupFlagLine = (line: string) => {
+    const trimmed = line.trim();
+    return (
+      /\b(?:serv_config_b64|serv_config_is_gzip)\b/.test(line) ||
+      /^http_port=\d+\b/.test(trimmed)
+    );
+  };
+
+  const isTensorpcServerStartedLog = (line: string) =>
+    /tensorpc\.(?:aioserver|http)\|server started at/.test(line);
+
+  const isServerStartedAddressContinuation = (line: string) =>
+    /^\s+(?:\[[^\]]+\]|[0-9.]+|[a-zA-Z0-9_.-]+):\d+\([^)]+\)\s*$/.test(line);
+
+  const isTensorpcDynamicCodeLog = (line: string) =>
+    /\bdcls\.is_dynamic_code\s+(?:True|False)\b/.test(line);
+
+  const startsInternalTraceback = (index: number) => {
+    if (!plainLines[index]?.includes("Traceback (most recent call last):")) {
+      return false;
+    }
+    const lookahead = plainLines.slice(index, index + 18).join("\n");
+    return (
+      lookahead.includes("/tensorpc/dock/serv/flowapp.py") ||
+      lookahead.includes("/tensorpc/core/asyncclient.py") ||
+      lookahead.includes("grpc.aio._call.AioRpcError") ||
+      lookahead.includes("_send_loop_v2") ||
+      lookahead.includes("_send_loop_stream_main")
+    );
+  };
+
+  const startsInternalTaskException = (index: number) => {
+    if (!plainLines[index]?.includes("Task exception was never retrieved")) {
+      return false;
+    }
+    return plainLines
+      .slice(index, index + 8)
+      .join("\n")
+      .includes("async generator ignored GeneratorExit");
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    const plainLine = plainLines[i] ?? "";
+    const isTensorpcHttpLog = /tensorpc\.http\|(?:ws .* disconnected|New Websocket)/.test(plainLine);
+
+    if (skippingStartupCommand) {
+      if (plainLine.includes("serv_config_is_gzip=True")) {
+        skippingStartupCommand = false;
+      }
+      continue;
+    }
+
+    if (maybeSkippingServerStartedAddress) {
+      maybeSkippingServerStartedAddress = false;
+      if (isServerStartedAddressContinuation(plainLine)) {
+        continue;
+      }
+    }
+
+    if (isTensorpcStartupCommand(plainLine)) {
+      const commandIndex = line.indexOf("python -m tensorpc.serve");
+      const promptPrefix = commandIndex > 0 ? line.slice(0, commandIndex).trimEnd() : "";
+      if (promptPrefix) {
+        kept.push(promptPrefix);
+      }
+      skippingStartupCommand = !plainLine.includes("serv_config_is_gzip=True");
+      continue;
+    }
+
+    if (isTensorpcStartupFlagLine(plainLine)) {
+      continue;
+    }
+
+    if (isTensorpcServerStartedLog(plainLine)) {
+      maybeSkippingServerStartedAddress = !/\([^)]+\)\s*$/.test(plainLine);
+      continue;
+    }
+
+    if (isTensorpcDynamicCodeLog(plainLine)) {
+      continue;
+    }
+
+    const shouldStartSkip =
+      startsInternalTraceback(i) ||
+      startsInternalTaskException(i) ||
+      isTensorpcHttpLog;
+
+    if (shouldStartSkip) {
+      skipping = !isTensorpcHttpLog;
+      continue;
+    }
+
+    if (skipping) {
+      if (/tensorpc\.http\|(?:ws .* disconnected|New Websocket)/.test(plainLine)) {
+        skipping = false;
+      }
+      continue;
+    }
+
+    kept.push(line);
+  }
+
+  return kept.join("\n");
+}
+
 export function sanitizeTerminalContent(value: string) {
-  return value
+  return stripTensorpcInternalNoise(value)
     .replace(/node_id_to_remove\s+\[[^\n]*\]/g, "")
     .replace(/SAVE GRAPH\s+\d+/g, "")
     .replace(/\n{3,}/g, "\n\n");
 }
 
 export function normalizeTerminalText(data: unknown) {
-  return sanitizeTerminalContent(stripUnsupportedAnsi(dataToText(data)));
+  return sanitizeTerminalContent(normalizeLineBreaks(stripUnsupportedAnsi(dataToText(data))));
 }
 
 const ansi16: Record<number, string> = {

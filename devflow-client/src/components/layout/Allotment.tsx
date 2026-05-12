@@ -127,6 +127,8 @@ export function Allotment({
         flexDirection: isVertical ? "column" : "row",
         width: "100%",
         height: "100%",
+        minWidth: 0,
+        minHeight: 0,
         overflow: "hidden",
       }}
     >
@@ -146,17 +148,24 @@ export function Allotment({
               display: "flex",
               flexDirection: isVertical ? "column" : "row",
               [isVertical ? "height" : "width"]: `${size}%`,
+              [isVertical ? "width" : "height"]: "100%",
               flexShrink: 0,
+              minWidth: 0,
+              minHeight: 0,
               overflow: "hidden",
               position: "relative",
             }}
           >
             <div
               style={{
-                flex: 1,
+                flex: "1 1 0%",
+                width: "100%",
+                height: "100%",
                 overflow: "hidden",
                 minWidth: 0,
                 minHeight: 0,
+                display: "flex",
+                flexDirection: isVertical ? "column" : "row",
               }}
             >
               {children[actualIdx]}

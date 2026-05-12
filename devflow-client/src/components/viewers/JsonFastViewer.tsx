@@ -13,7 +13,7 @@ export function JsonFastViewer({
   const data = props.value ?? props.data;
   const jsonStr = data != null
     ? JSON.stringify(data, null, 2)
-    : "No data";
+    : "";
 
   return (
     <pre
@@ -21,8 +21,9 @@ export function JsonFastViewer({
         ...sx,
         margin: 0,
         padding: 8,
-        backgroundColor: "#1a1a2e",
-        color: "#a6adc8",
+        backgroundColor: "var(--td-surface-2)",
+        color: "var(--td-text)",
+        border: "1px solid var(--td-border)",
         borderRadius: 4,
         fontSize: 11,
         fontFamily: "monospace",

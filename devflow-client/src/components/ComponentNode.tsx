@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { ComponentProps } from "../hooks/useLayoutModel";
 import { childUids } from "../utils/helpers";
+import { lookupLayoutNode, normalizeLayoutUid } from "../utils/layoutRefs";
 import { COMPONENT_REGISTRY } from "./registry";
 import { ErrorBoundary } from "../context/ErrorBoundary";
 
@@ -19,7 +20,7 @@ export function ComponentNode({
 
   // Pre-render children recursively
   const children = childUids(p).map((uid) => {
-    const child = layout[uid];
+    const child = lookupLayoutNode(layout, uid);
     if (!child) {
       console.warn("tensorpc layout references missing child", uid);
       return null;
@@ -79,8 +80,8 @@ function resolveTabChildren(
     | undefined;
   if (!tabDefs) return [];
   return tabDefs.map((td) => {
-    const compUid = String(td.component ?? td.value);
-    const child = layout[compUid];
+    const compUid = normalizeLayoutUid(td.component ?? td.value);
+    const child = lookupLayoutNode(layout, td.component ?? td.value);
     if (!child) {
       console.warn("tensorpc tab references missing child", compUid);
       return null;

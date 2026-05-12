@@ -52,6 +52,10 @@ export const FrontendEventType = {
   KeyHold: 12,
   KeyDown: 13,
   KeyUp: 14,
+  CanvasViewportChange: 15,
+  HudGroupLayoutChange: 16,
+  MeshPoseChange: 17,
+  PointerLockReleased: 18,
   Change: 20,
   Delete: 21,
   InputChange: 22,
@@ -83,6 +87,10 @@ export const FrontendEventType = {
   FlowPaneContextMenu: 86,
   FlowNodeLogicChange: 87,
   FlowVisChange: 89,
+  TerminalInput: 110,
+  TerminalResize: 111,
+  TerminalFrontendUnmount: 112,
+  TerminalFrontendMount: 113,
 } as const;
 
 export const FLOW_APP_EVENT =

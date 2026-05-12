@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import type { FlexComponentBaseProps } from "../components/types";
+import { normalizeLayoutUid } from "./layoutRefs";
 
 export function numOrStr(v: unknown): string | number | undefined {
   if (v === undefined || v === null) return undefined;
@@ -84,5 +85,5 @@ export function flexStyles(
 export function childUids(props: Record<string, unknown>): string[] {
   const c = props.childs;
   if (!Array.isArray(c)) return [];
-  return c.map((x) => (typeof x === "string" ? x : String(x)));
+  return c.map((x) => normalizeLayoutUid(x));
 }

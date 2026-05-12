@@ -12,7 +12,7 @@ export function JsonViewer({
   const data = props.value ?? props.data;
   const jsonStr = data != null
     ? JSON.stringify(data, null, 2)
-    : "No data";
+    : "";
 
   return (
     <pre
@@ -20,8 +20,9 @@ export function JsonViewer({
         ...sx,
         margin: 0,
         padding: 12,
-        backgroundColor: "#1e1e2e",
-        color: "#cdd6f4",
+        backgroundColor: "var(--td-surface-2)",
+        color: "var(--td-text)",
+        border: "1px solid var(--td-border)",
         borderRadius: 4,
         fontSize: 12,
         fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
