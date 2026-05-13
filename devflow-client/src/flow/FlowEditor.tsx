@@ -62,9 +62,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type ComponentEventSource = {
+  graphId?: string;
+  nodeId?: string;
+  uid?: string;
+};
+
+type ComponentEventTarget = {
+  graphId?: string;
+  nodeId?: string;
+};
+
 function dispatchComponentEventPayload(
   payload: Record<string, unknown>,
   remotePrefixes?: unknown,
+  source?: ComponentEventSource,
+  target?: ComponentEventTarget,
 ) {
   for (const [uid, data] of Object.entries(payload)) {
     window.dispatchEvent(
@@ -72,18 +85,11 @@ function dispatchComponentEventPayload(
         detail: {
           uid: patchLayoutUidWithPrefixes(uid, remotePrefixes),
           data,
+          source,
+          target,
         },
       }),
     );
-  }
-}
-
-function dispatchComponentEvents(ev: AppEventMessage) {
-  for (const [type, payload] of ev.typeToEvents ?? []) {
-    if (type !== AppEventType.ComponentEvent || !isRecord(payload)) {
-      continue;
-    }
-    dispatchComponentEventPayload(payload, ev.remotePrefixes);
   }
 }
 
@@ -773,7 +779,6 @@ export function FlowEditor({
         eventNodeId === selectedRuntimeNodeId ||
         eventNodeId === displayedRuntimeNodeId;
       if (!eventTargetsCurrentRuntime) {
-        dispatchComponentEvents(ev);
         return;
       }
       const lay = extractUpdateLayout(ev);
@@ -829,7 +834,14 @@ export function FlowEditor({
           setAppLayout((current) =>
             preserveEditorDrafts(applyDataModelComponentEvents(current, payload, ev.remotePrefixes)),
           );
-          dispatchComponentEventPayload(payload, ev.remotePrefixes);
+          dispatchComponentEventPayload(payload, ev.remotePrefixes, {
+            graphId: eventContext?.graphId ?? activeGraphIdRef.current ?? undefined,
+            nodeId: eventNodeId || undefined,
+            uid: ev.uid,
+          }, {
+            graphId: activeGraphIdRef.current ?? eventContext?.graphId ?? undefined,
+            nodeId: displayedRuntimeNodeId || selectedRuntimeNodeId || eventNodeId || undefined,
+          });
         }
       }
       if (!lay) {

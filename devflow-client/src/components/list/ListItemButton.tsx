@@ -11,6 +11,18 @@ export function ListItemButton({
   children: ReactNode[];
 }) {
   const sx = useFlexStyles(props);
+  const hasVisibleChildren = children.some((child) => child !== null && child !== undefined && child !== false);
+  const hasExplicitSurface =
+    sx.width !== undefined ||
+    sx.height !== undefined ||
+    sx.minHeight !== undefined ||
+    sx.flex !== undefined ||
+    sx.display !== undefined ||
+    props.divider === true ||
+    props.selected === true;
+  if (!hasVisibleChildren && !hasExplicitSurface) {
+    return null;
+  }
   return (
     <MuiListItemButton
       dense={props.dense === true}

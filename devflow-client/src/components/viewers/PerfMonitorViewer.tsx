@@ -34,9 +34,9 @@ type ViewState = {
 
 const DETAIL_MIN = 180;
 const DETAIL_MAX = 520;
-const PERF_ROW_PX = 22;
-const PERF_BAR_HEIGHT = 0.94;
-const PERF_ROW_BACKGROUND_HALF = 0.5;
+const PERF_ROW_PX = 13.25;
+const PERF_BAR_PX = 13;
+const PERF_BAR_HEIGHT = 0.86;
 const CHANGE_EVENT = 20;
 const DARK_BAR_PALETTE: Array<[number, number, number, number]> = [
   [0.86, 0.68, 0.65, 0.82],
@@ -453,7 +453,10 @@ function drawPerf(glState: GlState, rects: Rect[], view: ViewState, selected: nu
   const rangeX = Math.max(bounds.maxX - bounds.minX, 0.0001);
   const rangeY = Math.max(bounds.maxY - bounds.minY, 0.0001);
   const toX = (x: number) => ((x - bounds.minX) / rangeX) * 2 - 1;
-  const toY = (y: number) => ((y - bounds.minY) / rangeY) * 2 - 1;
+  const toPixelY = (y: number) => height - ((y - bounds.minY) / rangeY) * height;
+  const pixelYToNdc = (y: number) => 1 - (y / height) * 2;
+  const rowPitchPx = Math.max(6, PERF_ROW_PX * Math.max(view.scaleY, 1));
+  const rowBarPx = Math.max(4, Math.min(rowPitchPx - 2, PERF_BAR_PX * Math.max(view.scaleY, 1)));
   const visibleRows = Array.from(
     new Set(
       rects
@@ -497,16 +500,17 @@ function drawPerf(glState: GlState, rects: Rect[], view: ViewState, selected: nu
 
   for (let i = 0; i < visibleRows.length; i += 1) {
     const y = visibleRows[i]!;
-    const rowTop = toY(y + PERF_ROW_BACKGROUND_HALF);
-    const rowBottom = toY(y - PERF_ROW_BACKGROUND_HALF);
+    const centerPx = toPixelY(y);
+    const rowTopPx = centerPx - rowBarPx / 2;
+    const rowBottomPx = rowTopPx + rowBarPx;
     pushQuad(
       -1,
       1,
-      rowTop,
-      rowBottom,
+      pixelYToNdc(rowTopPx),
+      pixelYToNdc(rowBottomPx),
       isLight
-        ? (i % 2 === 0 ? [0.9, 0.92, 0.94, 0.2] : [0.86, 0.88, 0.9, 0.16])
-        : (i % 2 === 0 ? [0.15, 0.18, 0.21, 0.32] : [0.12, 0.15, 0.18, 0.26]),
+        ? (i % 2 === 0 ? [0.9, 0.92, 0.94, 0.16] : [0.86, 0.88, 0.9, 0.12])
+        : (i % 2 === 0 ? [0.15, 0.18, 0.21, 0.22] : [0.12, 0.15, 0.18, 0.18]),
     );
   }
 
@@ -521,33 +525,30 @@ function drawPerf(glState: GlState, rects: Rect[], view: ViewState, selected: nu
     }
     const left = toX(rect.x - rect.w / 2);
     const right = toX(rect.x + rect.w / 2);
-    const top = toY(rect.y + rect.h / 2);
-    const bottom = toY(rect.y - rect.h / 2);
+    const centerPx = toPixelY(rect.y);
+    const topPx = centerPx - rowBarPx / 2;
+    const bottomPx = topPx + rowBarPx;
+    const top = pixelYToNdc(topPx);
+    const bottom = pixelYToNdc(bottomPx);
     const minW = 2 / width;
-    const minH = 2 / height;
     const cx = (left + right) / 2;
-    const cy = (top + bottom) / 2;
     const halfW = Math.max(Math.abs(right - left) / 2, minW);
-    const halfH = Math.max(Math.abs(bottom - top) / 2, minH);
     const visibleLeft = cx - halfW;
     const visibleRight = cx + halfW;
-    const visibleTop = cy - halfH;
-    const visibleBottom = cy + halfH;
+    const visibleTop = top;
+    const visibleBottom = bottom;
     const isSelected = rect.index === selected;
     const [r, g, b, a] = rectColor(rect, isLight);
     pushQuad(visibleLeft, visibleRight, visibleTop, visibleBottom, [r, g, b, a]);
     const borderX = 2 / width;
-    const borderY = 2 / height;
     const border: [number, number, number, number] = isLight
-      ? [0.16, 0.28, 0.34, 0.14]
-      : [0.82, 0.92, 1, 0.1];
-    pushQuad(visibleLeft, visibleRight, visibleTop, Math.max(visibleBottom, visibleTop - borderY), border);
-    pushQuad(visibleLeft, visibleRight, Math.min(visibleTop, visibleBottom + borderY), visibleBottom, border);
+      ? [0.12, 0.25, 0.3, 0.1]
+      : [0.82, 0.92, 1, 0.08];
     pushQuad(visibleLeft, Math.min(visibleRight, visibleLeft + borderX), visibleTop, visibleBottom, border);
     pushQuad(Math.max(visibleLeft, visibleRight - borderX), visibleRight, visibleTop, visibleBottom, border);
     if (isSelected) {
       const lineX = 4 / width;
-      const lineY = 4 / height;
+      const lineY = 3 / height;
       const red: [number, number, number, number] = [1, 0.08, 0.06, 0.96];
       pushQuad(visibleLeft, visibleRight, visibleTop, Math.max(visibleBottom, visibleTop - lineY), red);
       pushQuad(visibleLeft, visibleRight, Math.min(visibleTop, visibleBottom + lineY), visibleBottom, red);

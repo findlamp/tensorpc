@@ -494,8 +494,41 @@ export function Terminal({
       return;
     }
     const handleEvent = (event: Event) => {
-      const custom = event as CustomEvent<{ uid?: string; data?: unknown }>;
+      const custom = event as CustomEvent<{
+        uid?: string;
+        data?: unknown;
+        source?: {
+          graphId?: string;
+          nodeId?: string;
+          uid?: string;
+        };
+        target?: {
+          graphId?: string;
+          nodeId?: string;
+        };
+      }>;
       const eventUid = typeof custom.detail?.uid === "string" ? custom.detail.uid : "";
+      const targetGraphId =
+        typeof custom.detail?.target?.graphId === "string" ? custom.detail.target.graphId : "";
+      const targetNodeId =
+        typeof custom.detail?.target?.nodeId === "string" ? custom.detail.target.nodeId : "";
+      const sourceGraphId =
+        typeof custom.detail?.source?.graphId === "string" ? custom.detail.source.graphId : "";
+      if (
+        (graphId && targetGraphId && targetGraphId !== graphId) ||
+        (nodeId && targetNodeId && targetNodeId !== nodeId)
+      ) {
+        return;
+      }
+      if (
+        !targetGraphId &&
+        !targetNodeId &&
+        graphId &&
+        sourceGraphId &&
+        sourceGraphId !== graphId
+      ) {
+        return;
+      }
       const normalizedEventUid = normalizeLayoutUid(eventUid);
       const uidMatches =
         eventUid === uid ||
@@ -517,7 +550,7 @@ export function Terminal({
     };
     window.addEventListener("tensorpc-component-event", handleEvent);
     return () => window.removeEventListener("tensorpc-component-event", handleEvent);
-  }, [normalizedUid, uid, writeTerminal]);
+  }, [graphId, nodeId, normalizedUid, uid, writeTerminal]);
 
   useEffect(() => {
     if (propLinesContent) {
