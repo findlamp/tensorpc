@@ -23,7 +23,7 @@ export function Typography({
           | "body1" | "body2" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
           | "caption" | "overline" | "subtitle1" | "subtitle2") ?? "body1"
       }
-      color={props.muiColor as string | undefined}
+      color={(props.muiColor ?? props.color) as string | undefined}
       align={props.align as "center" | "inherit" | "justify" | "left" | "right" | undefined}
       gutterBottom={props.gutterBottom === true}
       noWrap={shouldClipInlineText}

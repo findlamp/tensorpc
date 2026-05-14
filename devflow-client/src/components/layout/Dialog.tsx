@@ -6,6 +6,12 @@ import { FrontendEventType } from "../../core/socketTypes";
 import { useFlexStyles } from "../../hooks/useFlexStyles";
 import { useSendEvent } from "../../hooks/useSendEvent";
 
+function muiSpacing(value: unknown) {
+  if (typeof value === "number") return `${value * 4}px`;
+  if (typeof value === "string") return value;
+  return undefined;
+}
+
 export function Dialog({
   props,
   children,
@@ -64,6 +70,7 @@ export function Dialog({
           minHeight: 0,
           display: "flex",
           flexDirection: "column",
+          gap: muiSpacing(props.gap),
           overflow: "hidden",
           padding: props.includeFormControl === false ? 0 : undefined,
         }}

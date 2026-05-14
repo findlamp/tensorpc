@@ -1,8 +1,13 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import MuiAutocomplete from "@mui/material/Autocomplete";
 import MuiTextField from "@mui/material/TextField";
 import { useFlexStyles } from "../../hooks/useFlexStyles";
 import { useSendEvent } from "../../hooks/useSendEvent";
+import {
+  resetCmClusterSelection,
+  setCmClusterSelection,
+  useCmClusterSelection,
+} from "../special/cmSelectionState";
 
 export function AutoComplete({
   props,
@@ -15,26 +20,60 @@ export function AutoComplete({
   const sx = useFlexStyles(props);
   const sendEvent = useSendEvent();
   const compUid = props.compUid as string | undefined;
+  const isClusterPicker = props.label === "Clusters";
+  const cmSelection = useCmClusterSelection();
 
-  const options = Array.isArray(props.options)
-    ? (props.options as string[])
+  useLayoutEffect(() => {
+    if (isClusterPicker) resetCmClusterSelection();
+  }, [isClusterPicker, compUid]);
+
+  const boundOptions = clusterOptionsFromDataModel(layout, props);
+  const propOptions = Array.isArray(props.options)
+    ? (props.options as unknown[])
     : Array.isArray(props.items)
-      ? (props.items as string[])
+      ? (props.items as unknown[])
       : [];
-  const fallbackWorker = currentWorkerIp(layout, props);
-  const value = (props.value as string | undefined) ?? fallbackWorker;
+  const options = propOptions.length > 0 ? propOptions : boundOptions.options;
+  const fallbackWorker = currentWorkerOption(props);
+  const value = isClusterPicker
+    ? (cmSelection.value ?? null)
+    : props.value ?? boundOptions.value ?? fallbackWorker;
   const displayOptions =
     options.length > 0 ? options : fallbackWorker ? [fallbackWorker] : [];
+  const labelKey = typeof props.labelKey === "string" ? props.labelKey : "label";
+  const optionKey = typeof props.optionKey === "string" ? props.optionKey : "id";
+  const optionLabel = (option: unknown) => {
+    if (typeof option === "string" || typeof option === "number") return String(option);
+    if (option && typeof option === "object") {
+      const record = option as Record<string, unknown>;
+      const label = record[labelKey] ?? record.label ?? record.id ?? record.uid ?? record.ip;
+      if (label !== undefined && label !== null) return String(label);
+    }
+    return "";
+  };
+  const optionValue = (option: unknown) => {
+    if (option && typeof option === "object") {
+      const record = option as Record<string, unknown>;
+      return record[optionKey] ?? record.id ?? record[labelKey] ?? record.label;
+    }
+    return option;
+  };
 
   return (
     <MuiAutocomplete
       options={displayOptions}
       value={value ?? null}
+      getOptionLabel={optionLabel}
+      isOptionEqualToValue={(option, selected) =>
+        optionValue(option) === optionValue(selected) || optionLabel(option) === optionLabel(selected)
+      }
       size={props.size as "small" | "medium" | undefined}
       disabled={props.disabled === true}
+      disableClearable={props.disableClearable === true || props.label === "Clusters"}
       fullWidth={props.fullWidth === true}
       sx={{ ...sx, minWidth: 150 }}
       onChange={(_e, newValue) => {
+        if (isClusterPicker) setCmClusterSelection(newValue);
         if (compUid) sendEvent(compUid, 20 /* Change */, newValue);
       }}
       renderInput={(params) => (
@@ -49,28 +88,36 @@ export function AutoComplete({
   );
 }
 
-function currentWorkerIp(
+function currentWorkerOption(props: Record<string, unknown>) {
+  const label = typeof props.label === "string" ? props.label : "";
+  if (!label.startsWith("Workers")) return undefined;
+  if (Array.isArray(props.options) && props.options.length === 1) {
+    return props.options[0];
+  }
+  return undefined;
+}
+
+function clusterOptionsFromDataModel(
   layout: Record<string, unknown>,
   props: Record<string, unknown>,
 ) {
-  if (props.label !== "Workers") return undefined;
+  if (props.label !== "Clusters") return { options: [] as unknown[], value: undefined };
   for (const node of Object.values(layout)) {
     if (typeof node !== "object" || node === null) continue;
     const nodeProps = (node as { props?: unknown }).props;
     if (typeof nodeProps !== "object" || nodeProps === null) continue;
     const dataObject = (nodeProps as { dataObject?: unknown }).dataObject;
     if (typeof dataObject !== "object" || dataObject === null) continue;
-    const states = (dataObject as { client_states?: unknown }).client_states;
-    if (!Array.isArray(states) || states.length === 0) continue;
-    const selected = (dataObject as { selected_client_state?: unknown })
-      .selected_client_state;
-    const state =
-      typeof selected === "object" && selected !== null ? selected : states[0];
-    if (typeof state !== "object" || state === null) continue;
-    const ip = (state as { ip?: unknown }).ip;
-    if (typeof ip === "string" && ip.length > 0) return ip;
-    const label = (state as { label?: unknown }).label;
-    if (typeof label === "string" && label.length > 0) return label;
+    const record = dataObject as Record<string, unknown>;
+    if (!Array.isArray(record.clusters)) continue;
+    const current =
+      typeof record.cur_cluster === "object" && record.cur_cluster !== null
+        ? record.cur_cluster
+        : undefined;
+    return {
+      options: record.clusters,
+      value: current,
+    };
   }
-  return undefined;
+  return { options: [] as unknown[], value: undefined };
 }

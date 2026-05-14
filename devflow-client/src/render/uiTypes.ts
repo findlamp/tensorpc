@@ -42,7 +42,7 @@ export const UIType = {
   JsonLikeTreeView: 0x27,
   Allotment: 0x28,
   FlexLayout: 0x2a,
-  DynamicControls: 0x2b,
+  DockViewLayout: 0x2b,
   MonacoEditor: 0x2c,
   Icon: 0x2d,
   Markdown: 0x2e,
@@ -68,6 +68,7 @@ export const UIType = {
   VideoRTCStream: 0x43,
   JsonEditor: 0x44,
   JsonFastViewer: 0x45,
+  NumberField: 0x46,
 
   // Charts
   Plotly: 0x51,

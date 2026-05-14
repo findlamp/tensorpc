@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import type { ComponentProps } from "../hooks/useLayoutModel";
+import { UIType } from "../render/uiTypes";
 import { childUids } from "../utils/helpers";
+import { resolvePropsFromDataModel } from "../utils/dataModelBindings";
 import { lookupLayoutNode, normalizeLayoutUid } from "../utils/layoutRefs";
 import { COMPONENT_REGISTRY } from "./registry";
 import { ErrorBoundary } from "../context/ErrorBoundary";
@@ -16,7 +18,11 @@ export function ComponentNode({
   node: ComponentProps;
   layout: Record<string, ComponentProps>;
 }): ReactNode {
-  const p = { ...node.props, compUid: node.uid ?? undefined };
+  const nodeUid = typeof node.uid === "string" ? node.uid : undefined;
+  const p: Record<string, unknown> = {
+    ...resolvePropsFromDataModel(nodeUid ?? "", node, layout),
+    compUid: node.uid ?? undefined,
+  };
 
   // Pre-render children recursively
   const children = childUids(p).map((uid) => {
@@ -28,11 +34,14 @@ export function ComponentNode({
     return <ComponentNode key={uid} node={child} layout={layout} />;
   });
 
-  // For Tabs: children come from tabDefs, not childs
+  // For Tabs: panels come from tabDefs, while header extras are serialized in
+  // childsComplex.before/after. Render those separately so control bars survive.
   const resolvedChildren =
-    node.type === 0x31 /* Tabs */
-      ? resolveTabChildren(p, layout, node)
-      : children;
+    node.type === UIType.Tabs ? resolveTabChildren(p, layout) : children;
+  if (node.type === UIType.Tabs) {
+    p.__beforeNodes = resolveComplexChildren(p, layout, "before");
+    p.__afterNodes = resolveComplexChildren(p, layout, "after");
+  }
 
   const Comp = COMPONENT_REGISTRY[node.type];
 
@@ -70,7 +79,6 @@ export function ComponentNode({
 function resolveTabChildren(
   p: Record<string, unknown>,
   layout: Record<string, ComponentProps>,
-  _node: ComponentProps,
 ): ReactNode[] {
   const childsComplex = p.childsComplex as
     | Record<string, unknown>
@@ -88,4 +96,53 @@ function resolveTabChildren(
     }
     return <ComponentNode key={compUid} node={child} layout={layout} />;
   });
+}
+
+function resolveComplexChildren(
+  p: Record<string, unknown>,
+  layout: Record<string, ComponentProps>,
+  key: "before" | "after",
+): ReactNode[] {
+  const childsComplex = p.childsComplex as Record<string, unknown> | undefined;
+  const items = Array.isArray(childsComplex?.[key])
+    ? (childsComplex[key] as unknown[])
+    : Array.isArray(p[key])
+      ? (p[key] as unknown[])
+      : [];
+
+  return items.map((item, index) => {
+    if (isComponentProps(item)) {
+      return (
+        <ComponentNode
+          key={typeof item.uid === "string" ? item.uid : `${key}-${index}`}
+          node={item}
+          layout={layout}
+        />
+      );
+    }
+
+    const ref =
+      isRecord(item)
+        ? item.uid ?? item.component ?? item.compUid ?? item.child ?? item.value
+        : item;
+    const compUid = normalizeLayoutUid(ref);
+    const child = lookupLayoutNode(layout, ref);
+    if (!child) {
+      console.warn("tensorpc tabs references missing header child", compUid);
+      return null;
+    }
+    return <ComponentNode key={compUid || `${key}-${index}`} node={child} layout={layout} />;
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isComponentProps(value: unknown): value is ComponentProps {
+  return (
+    isRecord(value) &&
+    typeof value.type === "number" &&
+    isRecord(value.props)
+  );
 }

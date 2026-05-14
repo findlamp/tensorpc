@@ -262,8 +262,16 @@ export function Terminal({
   }, []);
 
   const fitTerminalPreservingViewport = useCallback((term: XTerm, fit: FitAddon) => {
+    const host = hostRef.current;
+    const rect = host?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return;
+    }
     const proposed = fit.proposeDimensions();
     if (!proposed) {
+      return;
+    }
+    if ((rect.width >= 180 && proposed.cols < 20) || (rect.height >= 120 && proposed.rows < 4)) {
       return;
     }
     const fitKey = `${proposed.cols}x${proposed.rows}`;
@@ -300,6 +308,7 @@ export function Terminal({
     preservingFitMarkerRef.current = marker ?? null;
     fit.fit();
     lastFitDimensionsRef.current = fitKey;
+    term.refresh(0, Math.max(0, term.rows - 1));
     restoreScroll();
     preservingFitFrameRef.current = requestAnimationFrame(() => {
       restoreScroll();
@@ -396,7 +405,18 @@ export function Terminal({
     fitTerminal();
     const resizeObserver = new ResizeObserver(fitTerminal);
     resizeObserver.observe(host);
+    if (rootRef.current) {
+      resizeObserver.observe(rootRef.current);
+    }
+    const mutationObserver = new MutationObserver(fitTerminal);
+    mutationObserver.observe(host, {
+      attributes: true,
+      attributeFilter: ["style", "class", "aria-hidden"],
+    });
     window.addEventListener("resize", fitTerminal);
+    const settleTimers = [80, 240, 600, 1200].map((delay) =>
+      window.setTimeout(fitTerminal, delay),
+    );
 
     const pending = pendingWritesRef.current.splice(0);
     pending.forEach((item) => writeTerminal(item.data, item.clear, item.forceFollow));
@@ -406,6 +426,8 @@ export function Terminal({
         cancelAnimationFrame(resizeRaf);
       }
       resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      settleTimers.forEach((timer) => window.clearTimeout(timer));
       window.removeEventListener("resize", fitTerminal);
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
@@ -668,10 +690,12 @@ export function Terminal({
         minWidth: sx.minWidth ?? 0,
         minHeight: sx.minHeight ?? 0,
         flex: sx.flex ?? "1 1 0%",
+        position: sx.position ?? "relative",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
         overscrollBehavior: "contain",
+        isolation: "isolate",
         backgroundColor: "var(--td-terminal-bg)",
         color: "var(--td-text)",
         border: "1px solid var(--td-border)",
@@ -687,6 +711,8 @@ export function Terminal({
           width: "100%",
           height: "100%",
           maxHeight: "100%",
+          position: "relative",
+          isolation: "isolate",
           overflow: "hidden",
         }}
       />

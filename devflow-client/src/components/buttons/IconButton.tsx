@@ -8,8 +8,8 @@ import { FrontendEventType } from "../../core/socketTypes";
 import { getIconName } from "../../render/iconMap";
 import { UIType } from "../../render/uiTypes";
 import type { ComponentProps } from "../../hooks/useLayoutModel";
-import { childUids } from "../../utils/helpers";
 import { lookupLayoutNode, normalizeLayoutUid } from "../../utils/layoutRefs";
+import { componentChildUids } from "../../utils/dataModelBindings";
 
 function iconFontSize(value: unknown): number | string | undefined {
   if (typeof value === "number" || typeof value === "string") return value;
@@ -53,7 +53,7 @@ function nodeHasPropBinding(node: ComponentProps | undefined, propName: string) 
 function buildParentMap(layout: Record<string, ComponentProps>) {
   const parents = new Map<string, string>();
   for (const [uid, node] of Object.entries(layout)) {
-    for (const childUid of childUids(node.props ?? {})) {
+    for (const childUid of componentChildUids(node)) {
       parents.set(normalizeLayoutUid(childUid), normalizeLayoutUid(uid));
     }
   }

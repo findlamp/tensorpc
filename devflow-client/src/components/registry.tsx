@@ -19,6 +19,7 @@ import { AccordionDetail } from "./layout/AccordionDetail";
 import { AppBar } from "./layout/AppBar";
 import { Toolbar } from "./layout/Toolbar";
 import { Drawer } from "./layout/Drawer";
+import { DockViewLayout } from "./layout/DockViewLayout";
 
 // Buttons
 import { Button } from "./buttons/Button";
@@ -40,8 +41,8 @@ import { Chip } from "./inputs/Chip";
 import { AutoComplete } from "./inputs/AutoComplete";
 import { MultipleAutoComplete } from "./inputs/MultipleAutoComplete";
 import { BlenderSlider } from "./inputs/BlenderSlider";
+import { NumberField } from "./inputs/NumberField";
 import { SimpleControls } from "./inputs/SimpleControls";
-import { DynamicControls } from "./inputs/DynamicControls";
 
 // Display
 import { Typography } from "./display/Typography";
@@ -143,6 +144,7 @@ export const COMPONENT_REGISTRY: Record<number, ComponentRenderFn> = {
   // Layout
   [UIType.Allotment]: Allotment,
   [UIType.FlexLayout]: FlexLayout,
+  [UIType.DockViewLayout]: DockViewLayout,
   [UIType.FlexBox]: FlexBox,
   [UIType.Paper]: Paper,
   [UIType.Card]: Card,
@@ -177,8 +179,8 @@ export const COMPONENT_REGISTRY: Record<number, ComponentRenderFn> = {
   [UIType.AutoComplete]: AutoComplete,
   [UIType.MultipleAutoComplete]: MultipleAutoComplete,
   [UIType.BlenderSlider]: BlenderSlider,
+  [UIType.NumberField]: NumberField,
   [UIType.SimpleControls]: SimpleControls,
-  [UIType.DynamicControls]: DynamicControls,
 
   // Display
   [UIType.Typography]: Typography,

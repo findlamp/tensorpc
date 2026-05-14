@@ -3,8 +3,11 @@ import type { SvgIconComponent } from "@mui/icons-material";
 import AccountTree from "@mui/icons-material/AccountTree";
 import AccountCircle from "@mui/icons-material/AccountCircle";
 import Add from "@mui/icons-material/Add";
+import AddBox from "@mui/icons-material/AddBox";
 import AddCard from "@mui/icons-material/AddCard";
+import AddTask from "@mui/icons-material/AddTask";
 import Adb from "@mui/icons-material/Adb";
+import Assignment from "@mui/icons-material/Assignment";
 import BarChart from "@mui/icons-material/BarChart";
 import Block from "@mui/icons-material/Block";
 import BugReport from "@mui/icons-material/BugReport";
@@ -29,6 +32,8 @@ import DataArray from "@mui/icons-material/DataArray";
 import DataObject from "@mui/icons-material/DataObject";
 import Dataset from "@mui/icons-material/Dataset";
 import Delete from "@mui/icons-material/Delete";
+import DeviceHub from "@mui/icons-material/DeviceHub";
+import DomainAdd from "@mui/icons-material/DomainAdd";
 import Done from "@mui/icons-material/Done";
 import Download from "@mui/icons-material/Download";
 import DragHandle from "@mui/icons-material/DragHandle";
@@ -52,6 +57,7 @@ import KeyboardDoubleArrowDown from "@mui/icons-material/KeyboardDoubleArrowDown
 import KeyboardDoubleArrowLeft from "@mui/icons-material/KeyboardDoubleArrowLeft";
 import KeyboardDoubleArrowRight from "@mui/icons-material/KeyboardDoubleArrowRight";
 import KeyboardDoubleArrowUp from "@mui/icons-material/KeyboardDoubleArrowUp";
+import Lan from "@mui/icons-material/Lan";
 import Link from "@mui/icons-material/Link";
 import LinkOff from "@mui/icons-material/LinkOff";
 import ManageAccounts from "@mui/icons-material/ManageAccounts";
@@ -65,6 +71,7 @@ import Output from "@mui/icons-material/Output";
 import Pause from "@mui/icons-material/Pause";
 import PlayArrow from "@mui/icons-material/PlayArrow";
 import PlayCircleOutline from "@mui/icons-material/PlayCircleOutline";
+import PlaylistAdd from "@mui/icons-material/PlaylistAdd";
 import Preview from "@mui/icons-material/Preview";
 import QueryStats from "@mui/icons-material/QueryStats";
 import RadioButtonChecked from "@mui/icons-material/RadioButtonChecked";
@@ -80,6 +87,8 @@ import Stop from "@mui/icons-material/Stop";
 import StopCircleOutlined from "@mui/icons-material/StopCircleOutlined";
 import SwapVert from "@mui/icons-material/SwapVert";
 import TableView from "@mui/icons-material/TableView";
+import Task from "@mui/icons-material/Task";
+import TaskAlt from "@mui/icons-material/TaskAlt";
 import Terminal from "@mui/icons-material/Terminal";
 import Timeline from "@mui/icons-material/Timeline";
 import Upload from "@mui/icons-material/Upload";
@@ -93,8 +102,11 @@ const ICON_COMPONENTS: Record<string, SvgIconComponent> = {
   AccountTree,
   AccountCircle,
   Add,
+  AddBox,
   AddCard,
+  AddTask,
   Adb,
+  Assignment,
   BarChart,
   Block,
   BugReport,
@@ -119,6 +131,8 @@ const ICON_COMPONENTS: Record<string, SvgIconComponent> = {
   DataObject,
   Dataset,
   Delete,
+  DeviceHub,
+  DomainAdd,
   Done,
   Download,
   DragHandle,
@@ -144,6 +158,7 @@ const ICON_COMPONENTS: Record<string, SvgIconComponent> = {
   KeyboardDoubleArrowLeft,
   KeyboardDoubleArrowRight,
   KeyboardDoubleArrowUp,
+  Lan,
   Link,
   LinkOff,
   ManageAccounts,
@@ -157,6 +172,7 @@ const ICON_COMPONENTS: Record<string, SvgIconComponent> = {
   Pause,
   PlayArrow,
   PlayCircleOutline,
+  PlaylistAdd,
   Preview,
   QueryStats,
   RadioButtonChecked,
@@ -172,6 +188,8 @@ const ICON_COMPONENTS: Record<string, SvgIconComponent> = {
   StopCircleOutlined,
   SwapVert,
   TableView,
+  Task,
+  TaskAlt,
   Terminal,
   Timeline,
   Upload,

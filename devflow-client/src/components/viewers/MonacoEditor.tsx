@@ -10,6 +10,7 @@ import { TensorPcContext } from "../../context/TensorPcContext";
 import { LayoutContext } from "../../context/LayoutContext";
 import { FrontendEventType } from "../../core/socketTypes";
 import { useFlexStyles } from "../../hooks/useFlexStyles";
+import { normalizeLayoutUid } from "../../utils/layoutRefs";
 
 const monacoGlobal = self as unknown as {
   MonacoEnvironment?: {
@@ -80,12 +81,14 @@ export function MonacoEditor({
     currentThemeMode(),
   );
   const timerRef = useRef<number | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const dirtyRef = useRef(false);
   const lastPropValueRef = useRef(propValue);
   const lastEditorIdentityRef = useRef("");
   const syncingFromPropsRef = useRef(false);
   const compUid = typeof props.compUid === "string" ? props.compUid : "";
+  const normalizedCompUid = useMemo(() => normalizeLayoutUid(compUid), [compUid]);
   const language = normalizeLanguage(
     typeof props.language === "string" ? props.language : "plaintext",
   );
@@ -199,16 +202,73 @@ export function MonacoEditor({
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         sendEditorSave();
       });
-      editor.layout();
+      requestAnimationFrame(() => editor.layout());
     },
     [sendEditorSave],
   );
 
   useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    let raf = 0;
+    const relayout = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const rect = root.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        editorRef.current?.layout({
+          width: Math.floor(rect.width),
+          height: Math.floor(rect.height),
+        });
+      });
+    };
+    relayout();
+    const resizeObserver = new ResizeObserver(relayout);
+    resizeObserver.observe(root);
+    const mutationObserver = new MutationObserver(relayout);
+    mutationObserver.observe(root, {
+      attributes: true,
+      attributeFilter: ["style", "class", "aria-hidden"],
+    });
+    window.addEventListener("resize", relayout);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      window.removeEventListener("resize", relayout);
+    };
+  }, [compUid]);
+
+  useEffect(() => {
     if (!compUid) return;
     const handleControlEvent = (event: Event) => {
-      const custom = event as CustomEvent<{ uid?: string; data?: unknown }>;
-      if (custom.detail?.uid !== compUid || !custom.detail.data || typeof custom.detail.data !== "object") return;
+      const custom = event as CustomEvent<{
+        uid?: string;
+        data?: unknown;
+        target?: { graphId?: string; nodeId?: string };
+      }>;
+      const eventUid = typeof custom.detail?.uid === "string" ? custom.detail.uid : "";
+      const targetGraphId =
+        typeof custom.detail?.target?.graphId === "string" ? custom.detail.target.graphId : "";
+      const targetNodeId =
+        typeof custom.detail?.target?.nodeId === "string" ? custom.detail.target.nodeId : "";
+      if (
+        (graphId && targetGraphId && targetGraphId !== graphId) ||
+        (nodeId && targetNodeId && targetNodeId !== nodeId)
+      ) {
+        return;
+      }
+      const normalizedEventUid = normalizeLayoutUid(eventUid);
+      if (
+        eventUid !== compUid &&
+        eventUid !== normalizedCompUid &&
+        normalizedEventUid !== compUid &&
+        normalizedEventUid !== normalizedCompUid
+      ) {
+        return;
+      }
+      if (!custom.detail.data || typeof custom.detail.data !== "object") return;
       const data = custom.detail.data as Record<string, unknown>;
       const type = Number(data.type);
       if (type === MonacoEditorControlType.Save) {
@@ -237,15 +297,20 @@ export function MonacoEditor({
     };
     window.addEventListener("tensorpc-component-event", handleControlEvent);
     return () => window.removeEventListener("tensorpc-component-event", handleControlEvent);
-  }, [compUid, sendEditorSave]);
+  }, [compUid, graphId, nodeId, normalizedCompUid, sendEditorSave]);
 
   return (
     <div
+      ref={rootRef}
+      className="tensorpc-monaco-host"
       style={{
         ...sx,
         minHeight: sx.minHeight ?? sx.height ?? 0,
+        minWidth: sx.minWidth ?? 0,
         height: "100%",
         width: sx.width ?? "100%",
+        flex: sx.flex ?? "1 1 0%",
+        position: sx.position ?? "relative",
         display: "flex",
         flexDirection: "column",
         background: "var(--td-surface)",
@@ -255,43 +320,55 @@ export function MonacoEditor({
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
       }}
     >
-      <Editor
-        value={value}
-        language={language}
-        path={editorPath}
-        theme={themeMode === "dark" ? "vs-dark" : "vs"}
-        onMount={handleMount}
-        onChange={(nextValue) => {
-          const safeValue = nextValue ?? "";
-          setValue(safeValue);
-          if (syncingFromPropsRef.current) return;
-          dirtyRef.current = safeValue !== lastPropValueRef.current;
-          publishEditorValue(compUid, safeValue, editorPath);
-          queueEditorChange(safeValue);
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
         }}
-        options={{
-          readOnly,
-          fontFamily: "JetBrains Mono, Fira Code, Menlo, Monaco, Consolas, monospace",
-          fontSize: 13,
-          lineHeight: 20,
-          minimap: { enabled: true, side: "right", renderCharacters: false },
-          scrollBeyondLastLine: false,
-          automaticLayout: true,
-          tabSize: 4,
-          insertSpaces: true,
-          wordWrap,
-          wrappingIndent:
-            typeof options.wrappingIndent === "string"
-              ? (options.wrappingIndent as "none" | "same" | "indent" | "deepIndent")
-              : "same",
-          renderWhitespace: "selection",
-          folding: true,
-          lineNumbersMinChars: 3,
-          glyphMargin: options.glyphMargin === true,
-          bracketPairColorization: { enabled: true },
-          padding: { top: 10, bottom: 10 },
-        }}
-      />
+      >
+        <Editor
+          height="100%"
+          width="100%"
+          value={value}
+          language={language}
+          path={editorPath}
+          theme={themeMode === "dark" ? "vs-dark" : "vs"}
+          onMount={handleMount}
+          onChange={(nextValue) => {
+            const safeValue = nextValue ?? "";
+            setValue(safeValue);
+            if (syncingFromPropsRef.current) return;
+            dirtyRef.current = safeValue !== lastPropValueRef.current;
+            publishEditorValue(compUid, safeValue, editorPath);
+            queueEditorChange(safeValue);
+          }}
+          options={{
+            readOnly,
+            fontFamily: "JetBrains Mono, Fira Code, Menlo, Monaco, Consolas, monospace",
+            fontSize: 13,
+            lineHeight: 20,
+            minimap: { enabled: true, side: "right", renderCharacters: false },
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 4,
+            insertSpaces: true,
+            wordWrap,
+            wrappingIndent:
+              typeof options.wrappingIndent === "string"
+                ? (options.wrappingIndent as "none" | "same" | "indent" | "deepIndent")
+                : "same",
+            renderWhitespace: "selection",
+            folding: true,
+            lineNumbersMinChars: 3,
+            glyphMargin: options.glyphMargin === true,
+            bracketPairColorization: { enabled: true },
+            padding: { top: 10, bottom: 10 },
+          }}
+        />
+      </div>
     </div>
   );
 }
